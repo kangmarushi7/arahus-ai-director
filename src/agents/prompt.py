@@ -238,7 +238,9 @@ class PromptAgent(BaseAgent[Storyboard]):
             len(plan.scenes),
         )
 
+        self._log_progress(f"Building SDXL prompt instruction for {plan.topic!r}")
         instruction = generate_prompt_agent_prompt(plan, research)
+        self._log_progress(f"Prompt instruction ready ({len(instruction)} chars)")
         if self.debug:
             self.logger.debug(
                 "event=prompt_instruction_built agent=PromptAgent "
@@ -248,6 +250,7 @@ class PromptAgent(BaseAgent[Storyboard]):
             )
 
         try:
+            self._log_progress("Calling prompt LLM…")
             storyboard = self._execute(
                 lambda: self._llm_client.generate_json(instruction, Storyboard),
                 plan=plan,

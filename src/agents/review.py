@@ -157,7 +157,9 @@ class ReviewAgent(BaseAgent[ReviewResult]):
             len(storyboard.scenes),
         )
 
+        self._log_progress(f"Building review prompt for {storyboard.topic!r}")
         prompt = generate_review_prompt(storyboard)
+        self._log_progress(f"Review prompt ready ({len(prompt)} chars)")
         if self.debug:
             self.logger.debug(
                 "event=review_prompt_built agent=ReviewAgent "
@@ -167,6 +169,7 @@ class ReviewAgent(BaseAgent[ReviewResult]):
             )
 
         try:
+            self._log_progress("Calling review LLM…")
             result = self._execute(
                 lambda: self._llm_client.generate_json(prompt, ReviewResult),
                 storyboard=storyboard,

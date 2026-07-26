@@ -9,8 +9,11 @@ from src.models.image import ImageResult
 from src.models.pipeline import PipelineResult
 from src.models.storyboard import Storyboard
 from src.pipeline import DirectorPipeline, ImageGenerator, StorageClient
+from src.progress import ProgressCallback
 from src.services.r2 import R2StorageClient
 from src.services.runpod import RunPodImageGenerator
+from src.services.runpod_client import RunPodClient
+from src.playground.prompt_playground import PromptPlayground
 
 logger = logging.getLogger(__name__)
 
@@ -38,22 +41,22 @@ class StubStorageClient:
 def _build_image_services() -> tuple[ImageGenerator, StorageClient]:
     """Prefer real RunPod/R2 clients; fall back to stubs for local studio use."""
     settings = get_settings()
-    try:
-        api_key, endpoint_id = settings.image.require_credentials()
-        image_generator: ImageGenerator = RunPodImageGenerator(
-            api_key=api_key,
-            endpoint_id=endpoint_id,
-            base_url=settings.image.base_url,
-        )
-    except RuntimeError as exc:
-        logger.warning("Using stub image generator: %s", exc)
-        image_generator = StubImageGenerator()
 
     try:
         storage_client: StorageClient = R2StorageClient(settings.storage)
     except RuntimeError as exc:
         logger.warning("Using stub storage client: %s", exc)
         storage_client = StubStorageClient()
+
+    try:
+        runpod_client = RunPodClient.from_config(settings.image)
+        image_generator: ImageGenerator = RunPodImageGenerator(
+            runpod_client=runpod_client,
+            storage_client=storage_client,
+        )
+    except RuntimeError as exc:
+        logger.warning("Using stub image generator: %s", exc)
+        image_generator = StubImageGenerator()
 
     return image_generator, storage_client
 
@@ -90,13 +93,32 @@ def generate_storyboard(topic: str) -> Storyboard:
     return build_pipeline().generate(topic).storyboard
 
 
-def generate_pipeline_result(topic: str) -> PipelineResult:
+def generate_pipeline_result(
+    topic: str,
+    progress_callback: ProgressCallback | None = None,
+) -> PipelineResult:
     """Run the full pipeline and return every intermediate artifact.
 
     Args:
         topic: Historical subject or event.
+        progress_callback: Optional ``(message, fraction)`` sink for live UIs.
 
     Returns:
         The complete :class:`PipelineResult`.
     """
-    return build_pipeline().generate(topic)
+    return build_pipeline().generate(topic, progress_callback=progress_callback)
+
+
+def build_prompt_playground() -> PromptPlayground:
+    """Assemble a :class:`PromptPlayground` with the configured image generator.
+
+    Returns:
+        A playground ready for per-scene prompt versioning and image renders.
+    """
+    image_generator, _storage = _build_image_services()
+    return PromptPlayground(image_generator=image_generator)
+
+
+def playground_image_model() -> str:
+    """Return the configured image model id for prompt-version labels."""
+    return get_settings().image.model_id

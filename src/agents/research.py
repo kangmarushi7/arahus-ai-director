@@ -126,12 +126,14 @@ class ResearchAgent(BaseAgent[ResearchResult]):
             raise ValueError("topic must be a non-empty string")
 
         cleaned_topic = " ".join(topic.split())
+        self._log_progress(f"Building research prompt for {cleaned_topic!r}")
         self.logger.info(
             "event=research_start agent=ResearchAgent topic=%r",
             cleaned_topic,
         )
 
         prompt = generate_research_prompt(cleaned_topic)
+        self._log_progress(f"Research prompt ready ({len(prompt)} chars)")
         if self.debug:
             self.logger.debug(
                 "event=research_prompt_built agent=ResearchAgent "
@@ -141,6 +143,7 @@ class ResearchAgent(BaseAgent[ResearchResult]):
             )
 
         try:
+            self._log_progress("Calling research LLM…")
             result = self._execute(
                 lambda: self._llm_client.generate_json(prompt, ResearchResult),
                 topic=cleaned_topic,

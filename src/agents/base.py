@@ -52,7 +52,15 @@ class BaseAgent(ABC, Generic[T]):
         self.max_retries = max(1, max_retries)
         self.retry_backoff_seconds = max(0.0, retry_backoff_seconds)
         self.debug = _env_flag("AGENT_DEBUG") if debug is None else debug
+        self.progress_callback: Callable[[str], None] | None = None
 
+    def _log_progress(self, message: str) -> None:
+        """Forward a human-readable step to the optional progress sink."""
+        if self.progress_callback is not None:
+            try:
+                self.progress_callback(message)
+            except Exception:  # noqa: BLE001 - UI sinks must not break agents
+                self.logger.exception("progress_callback failed")
     @abstractmethod
     def run(self, *args: Any, **kwargs: Any) -> T:
         """Execute the agent's core work and return a typed result.
@@ -68,6 +76,7 @@ class BaseAgent(ABC, Generic[T]):
         implementation logs the call at INFO (or DEBUG when ``debug`` is on).
         """
         self.logger.info("%s starting", self.__class__.__name__)
+        self._log_progress(f"{self.__class__.__name__}: starting")
         if self.debug:
             self.logger.debug(
                 "%s _before_run args=%r kwargs=%r",
@@ -95,6 +104,9 @@ class BaseAgent(ABC, Generic[T]):
             "%s completed in %.3fs",
             self.__class__.__name__,
             elapsed_seconds,
+        )
+        self._log_progress(
+            f"{self.__class__.__name__}: finished in {elapsed_seconds:.1f}s"
         )
         if self.debug:
             self.logger.debug(
@@ -130,6 +142,10 @@ class BaseAgent(ABC, Generic[T]):
             attempt,
             self.max_retries,
             error,
+        )
+        self._log_progress(
+            f"{self.__class__.__name__}: attempt {attempt}/{self.max_retries} "
+            f"failed — {type(error).__name__}: {error}"
         )
         if self.debug:
             self.logger.debug(
@@ -167,6 +183,9 @@ class BaseAgent(ABC, Generic[T]):
         last_error: Exception | None = None
 
         for attempt in range(1, self.max_retries + 1):
+            self._log_progress(
+                f"{self.__class__.__name__}: attempt {attempt}/{self.max_retries}"
+            )
             try:
                 result = operation()
             except Exception as error:  # noqa: BLE001 - retry policy is deliberate
@@ -180,6 +199,9 @@ class BaseAgent(ABC, Generic[T]):
                         "%s retrying in %.2fs",
                         self.__class__.__name__,
                         delay,
+                    )
+                    self._log_progress(
+                        f"{self.__class__.__name__}: retrying in {delay:.1f}s"
                     )
                     time.sleep(delay)
                 continue

@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
+import time
+from collections.abc import Callable
 from typing import Type, TypeVar
 
 from openai import APIError, APITimeoutError, OpenAI, RateLimitError
@@ -91,6 +94,16 @@ class LLMClient:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self._client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+        self.progress_callback: Callable[[str], None] | None = None
+        self._logger = logging.getLogger(self.__class__.__name__)
+
+    def _log_progress(self, message: str) -> None:
+        """Forward a step line to the optional progress sink."""
+        if self.progress_callback is not None:
+            try:
+                self.progress_callback(message)
+            except Exception:  # noqa: BLE001 - UI sinks must not break LLM calls
+                self._logger.exception("progress_callback failed")
 
     def generate_json(self, prompt: str, response_model: Type[T]) -> T:
         """Send ``prompt`` to the LLM and return a validated ``response_model``.
@@ -111,9 +124,28 @@ class LLMClient:
         if not prompt.strip():
             raise ValueError("prompt must be a non-empty string")
 
+        self._log_progress(
+            f"LLM [{self.model}] sending request "
+            f"({len(prompt)} chars → {response_model.__name__})"
+        )
+        started = time.perf_counter()
         raw_text = self._request_json_text(prompt)
+        self._log_progress(
+            f"LLM [{self.model}] response received "
+            f"({len(raw_text)} chars in {time.perf_counter() - started:.1f}s)"
+        )
+
+        self._log_progress(f"LLM [{self.model}] parsing JSON…")
         data = self._parse_json(raw_text)
-        return self._validate(data, response_model, raw_text=raw_text)
+
+        self._log_progress(
+            f"LLM [{self.model}] validating {response_model.__name__}…"
+        )
+        result = self._validate(data, response_model, raw_text=raw_text)
+        self._log_progress(
+            f"LLM [{self.model}] validated {response_model.__name__} OK"
+        )
+        return result
 
     def _request_json_text(self, prompt: str) -> str:
         """Call the provider and return the assistant message content."""

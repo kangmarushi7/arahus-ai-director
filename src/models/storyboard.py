@@ -13,7 +13,8 @@ class Scene(StrictModel):
 
     ``image_prompt`` is filled in by the prompt agent and ``image`` by the
     image stage, so both are optional while the scene is still a plain
-    narrative beat from the director.
+    narrative beat from the director. ``error`` captures a per-scene image
+    failure without aborting the rest of the storyboard.
     """
 
     id: int = Field(ge=1)
@@ -21,6 +22,7 @@ class Scene(StrictModel):
     description: str
     image_prompt: str | None = None
     image: ImageResult | None = None
+    error: str | None = None
 
 
 class DirectorPlan(StrictModel):

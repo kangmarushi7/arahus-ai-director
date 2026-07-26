@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Protocol, runtime_checkable
 
 from src.config import get_settings
@@ -28,6 +29,7 @@ from src.monitoring.metrics import (
     TOTAL_LATENCY,
     MetricsCollector,
 )
+from src.progress import ProgressCallback, ProgressReporter
 from src.services.llm import LLMClient
 from src.services.llm_factory import create_llm
 
@@ -135,8 +137,13 @@ class DirectorPipeline:
             self._review_llm,
             debug=settings.pipeline.agent_debug,
         )
+        self._reporter: ProgressReporter | None = None
 
-    def generate(self, topic: str) -> PipelineResult:
+    def generate(
+        self,
+        topic: str,
+        progress_callback: ProgressCallback | None = None,
+    ) -> PipelineResult:
         """Build a full pipeline result for ``topic``.
 
         Captures research, director plan, approved storyboard, review, image
@@ -144,6 +151,8 @@ class DirectorPipeline:
 
         Args:
             topic: Historical subject or event.
+            progress_callback: Optional callable invoked with human-readable
+                progress lines for live consoles.
 
         Returns:
             A :class:`PipelineResult` with every intermediate artifact.
@@ -157,6 +166,9 @@ class DirectorPipeline:
             raise ValueError("topic must be a non-empty string")
 
         cleaned_topic = " ".join(topic.split())
+        self._reporter = ProgressReporter(callback=progress_callback)
+        self._bind_step_loggers()
+        self._emit(f"Pipeline started for topic: {cleaned_topic}", progress=0.01)
         self._metrics.reset()
         started = time.perf_counter()
         stage_timings: dict[str, float] = {
@@ -168,34 +180,79 @@ class DirectorPipeline:
         }
 
         try:
+            self._begin_stage("Research")
+            self._emit(
+                "Stage 1/5 — Research Agent: gathering historical facts…",
+                progress=0.05,
+            )
             stage_started = time.perf_counter()
             with self._metrics.measure(RESEARCH_LATENCY):
                 research = self._research_agent.run(cleaned_topic)
             stage_timings["research_seconds"] = time.perf_counter() - stage_started
+            self._complete_stage("Research")
+            self._emit(
+                "Research complete "
+                f"({stage_timings['research_seconds']:.1f}s) — "
+                f"location={research.location or 'n/a'}, "
+                f"people={len(research.key_people)}, "
+                f"events={len(getattr(research, 'important_events', []) or [])}",
+                progress=0.22,
+            )
 
+            self._begin_stage("Director")
+            self._emit(
+                "Stage 2/5 — Director Agent: planning four scenes…",
+                progress=0.25,
+            )
             stage_started = time.perf_counter()
             with self._metrics.measure(DIRECTOR_LATENCY):
                 plan = self._director_agent.run(cleaned_topic, research)
             stage_timings["director_seconds"] = time.perf_counter() - stage_started
+            self._complete_stage("Director")
+            self._emit(
+                "Director complete "
+                f"({stage_timings['director_seconds']:.1f}s) — "
+                f"{len(plan.scenes)} scenes",
+                progress=0.42,
+            )
+            for scene in plan.scenes:
+                self._emit(f"  Scene {scene.id}: {scene.title}")
 
+            self._emit(
+                "Stage 3–4/5 — Prompt + Review Agents…",
+                progress=0.45,
+            )
             storyboard, review, prompt_seconds, review_seconds = (
                 self._generate_approved_storyboard(plan, research)
             )
             stage_timings["prompt_seconds"] = prompt_seconds
             stage_timings["review_seconds"] = review_seconds
+            self._emit(
+                "Storyboard approved "
+                f"(score={review.overall_score:.0f}, "
+                f"prompt={prompt_seconds:.1f}s, review={review_seconds:.1f}s)",
+                progress=0.72,
+            )
 
-            rendered_scenes: list[Scene] = []
-            images: list[GeneratedImageInfo] = []
+            self._begin_stage("Images")
+            self._emit("Stage 5/5 — Image generation…", progress=0.75)
             stage_started = time.perf_counter()
-            for scene in storyboard.scenes:
-                rendered, image_info = self._render_scene_safe(scene)
-                rendered_scenes.append(rendered)
-                images.append(image_info)
+            final_storyboard, images = self._render_storyboard_images(storyboard)
             stage_timings["image_seconds"] = time.perf_counter() - stage_started
+            self._complete_stage("Images")
+            self._emit(
+                f"Image stage complete ({stage_timings['image_seconds']:.1f}s) — "
+                f"{sum(1 for item in images if item.url)}/"
+                f"{len(images)} scenes with URLs",
+                progress=0.98,
+            )
 
-            final_storyboard = storyboard.model_copy(update={"scenes": rendered_scenes})
+            total = time.perf_counter() - started
+            self._emit(f"Pipeline finished in {total:.1f}s", progress=1.0)
         finally:
             self._metrics.record_pipeline_duration(time.perf_counter() - started)
+            self._unbind_step_loggers()
+            self._reporter = None
 
         return PipelineResult(
             topic=cleaned_topic,
@@ -206,6 +263,66 @@ class DirectorPipeline:
             images=images,
             metrics=self._studio_metrics_snapshot(stage_timings),
         )
+
+    def _bind_step_loggers(self) -> None:
+        """Attach fine-grained step logging to agents and LLM clients."""
+
+        def step(message: str) -> None:
+            self._emit(f"  · {message}")
+
+        for agent in (
+            self._research_agent,
+            self._director_agent,
+            self._prompt_agent,
+            self._review_agent,
+        ):
+            agent.progress_callback = step
+        for llm in (
+            self._research_llm,
+            self._director_llm,
+            self._prompt_llm,
+            self._review_llm,
+        ):
+            llm.progress_callback = step
+
+    def _unbind_step_loggers(self) -> None:
+        """Clear progress sinks after a pipeline run."""
+        for agent in (
+            self._research_agent,
+            self._director_agent,
+            self._prompt_agent,
+            self._review_agent,
+        ):
+            agent.progress_callback = None
+        for llm in (
+            self._research_llm,
+            self._director_llm,
+            self._prompt_llm,
+            self._review_llm,
+        ):
+            llm.progress_callback = None
+
+    def _emit(self, message: str, *, progress: float | None = None) -> None:
+        """Send a progress line to the optional reporter and logger."""
+        self.logger.info("%s", message)
+        reporter = self._reporter
+        if reporter is not None:
+            reporter.emit(message, progress=progress)
+
+    def _begin_stage(self, name: str) -> None:
+        reporter = self._reporter
+        if reporter is not None:
+            reporter.begin_stage(name)
+
+    def _set_stage(self, name: str, fraction: float) -> None:
+        reporter = self._reporter
+        if reporter is not None:
+            reporter.set_stage(name, fraction)
+
+    def _complete_stage(self, name: str) -> None:
+        reporter = self._reporter
+        if reporter is not None:
+            reporter.complete_stage(name)
 
     def _generate_approved_storyboard(
         self,
@@ -224,16 +341,42 @@ class DirectorPipeline:
         review_seconds = 0.0
 
         for attempt in range(1, total_attempts + 1):
+            # Prompt/review share 0.45 → 0.72 of the bar across attempts.
+            attempt_span = 0.27 / total_attempts
+            attempt_base = 0.45 + (attempt - 1) * attempt_span
+
+            self._begin_stage("Prompt")
+            self._set_stage("Prompt", 0.15)
+            self._emit(
+                f"Prompt Agent attempt {attempt}/{total_attempts}: "
+                "writing SDXL image prompts…",
+                progress=attempt_base,
+            )
             stage_started = time.perf_counter()
             with self._metrics.measure(PROMPT_LATENCY):
                 storyboard = self._prompt_agent.run(plan, research)
             prompt_seconds += time.perf_counter() - stage_started
+            self._complete_stage("Prompt")
+            self._emit(
+                f"Prompt Agent finished attempt {attempt} "
+                f"({time.perf_counter() - stage_started:.1f}s) — "
+                f"{len(storyboard.scenes)} prompts",
+                progress=attempt_base + attempt_span * 0.45,
+            )
 
+            self._begin_stage("Review")
+            self._set_stage("Review", 0.15)
+            self._emit(
+                f"Review Agent attempt {attempt}/{total_attempts}: "
+                "scoring storyboard…",
+                progress=attempt_base + attempt_span * 0.55,
+            )
             stage_started = time.perf_counter()
             with self._metrics.measure(REVIEW_LATENCY):
                 review = self._review_agent.run(storyboard)
             review_seconds += time.perf_counter() - stage_started
             last_review = review
+            self._complete_stage("Review")
 
             self.logger.info(
                 "event=storyboard_review topic=%r attempt=%s/%s "
@@ -244,12 +387,27 @@ class DirectorPipeline:
                 review.overall_score,
                 review.approved,
             )
+            self._emit(
+                f"Review score={review.overall_score:.0f} "
+                f"history={review.historical_accuracy:.0f} "
+                f"visual={review.visual_quality:.0f} "
+                f"continuity={review.scene_continuity:.0f} "
+                f"prompts={review.prompt_quality:.0f} "
+                f"approved={review.approved}",
+                progress=attempt_base + attempt_span,
+            )
+            if review.issues:
+                self._emit(f"  Issues: {'; '.join(review.issues[:3])}")
 
             if review.approved:
                 return storyboard, review, prompt_seconds, review_seconds
 
             if attempt < total_attempts:
                 self._metrics.record_retry(1)
+                self._emit(
+                    "Storyboard rejected — regenerating prompts "
+                    f"(retry {attempt}/{self._max_storyboard_retries})"
+                )
                 self.logger.warning(
                     "event=storyboard_retry topic=%r retry=%s/%s score=%s "
                     "issues=%r recommendations=%r",
@@ -262,6 +420,10 @@ class DirectorPipeline:
                 )
 
         assert last_review is not None
+        self._emit(
+            f"Storyboard rejected after {total_attempts} attempts "
+            f"(final score={last_review.overall_score:.0f})"
+        )
         self.logger.error(
             "event=storyboard_rejected topic=%r attempts=%s score=%s",
             plan.topic,
@@ -276,12 +438,121 @@ class DirectorPipeline:
             review=last_review,
         )
 
+    def _render_storyboard_images(
+        self,
+        storyboard: Storyboard,
+    ) -> tuple[Storyboard, list[GeneratedImageInfo]]:
+        """Render every storyboard scene concurrently, preserving order.
+
+        Uses :class:`~concurrent.futures.ThreadPoolExecutor` so RunPod/R2 I/O
+        overlaps across scenes. A failure on one scene does not cancel the
+        others; errors are attached to the corresponding :class:`Scene`.
+
+        Args:
+            storyboard: Approved storyboard with image prompts.
+
+        Returns:
+            A complete storyboard (scenes in original order, each with
+            ``image`` and/or ``error``) plus studio image-info rows.
+        """
+        scenes = list(storyboard.scenes)
+        scene_count = len(scenes)
+        if scene_count == 0:
+            return storyboard, []
+
+        self._emit(
+            f"Rendering {scene_count} scenes concurrently "
+            f"(max_workers={scene_count})…"
+        )
+        for index, scene in enumerate(scenes):
+            image_number = index + 1
+            self._set_stage("Images", image_number / (scene_count * 2))
+            self._emit(
+                f"Generating image {image_number}/{scene_count}...",
+                progress=0.75 + (0.05 * (index / scene_count)),
+            )
+            self._emit(
+                f"  Queued scene {scene.id}: {scene.title} "
+                f"({len(scene.image_prompt or '')} chars)"
+            )
+
+        # Preserve input order: index → (Scene, GeneratedImageInfo).
+        ordered: list[tuple[Scene, GeneratedImageInfo] | None] = [None] * scene_count
+        completed = 0
+
+        with ThreadPoolExecutor(max_workers=scene_count) as executor:
+            future_to_index = {
+                executor.submit(self._render_scene_safe, scene): index
+                for index, scene in enumerate(scenes)
+            }
+            for future in as_completed(future_to_index):
+                index = future_to_index[future]
+                source = scenes[index]
+                try:
+                    rendered, info = future.result()
+                except Exception as exc:  # noqa: BLE001 - isolate worker crashes
+                    self.logger.exception(
+                        "event=image_render_worker_crashed scene_id=%s title=%r",
+                        source.id,
+                        source.title,
+                    )
+                    error_message = f"{type(exc).__name__}: {exc}"
+                    rendered = source.model_copy(
+                        update={"image": None, "error": error_message}
+                    )
+                    info = GeneratedImageInfo(
+                        scene_id=source.id,
+                        title=source.title,
+                        prompt=source.image_prompt or source.description,
+                        url=None,
+                        status=f"Failed: {error_message}",
+                    )
+
+                ordered[index] = (rendered, info)
+                completed += 1
+                image_number = index + 1
+                self._set_stage("Images", 0.5 + (0.5 * (completed / scene_count)))
+                progress = 0.80 + (0.18 * (completed / scene_count))
+                self._emit(
+                    f"Completed image {image_number}/{scene_count}... "
+                    f"({info.status}"
+                    + (f" → {info.url}" if info.url else "")
+                    + ")",
+                    progress=progress,
+                )
+
+        rendered_scenes = [item[0] for item in ordered if item is not None]
+        images = [item[1] for item in ordered if item is not None]
+        # Defensive: keep length/order identical to the input storyboard.
+        if len(rendered_scenes) != scene_count:
+            raise RuntimeError(
+                "Concurrent image stage lost scenes: "
+                f"expected {scene_count}, got {len(rendered_scenes)}"
+            )
+
+        return (
+            storyboard.model_copy(update={"scenes": rendered_scenes}),
+            images,
+        )
+
     def _render_scene_safe(self, scene: Scene) -> tuple[Scene, GeneratedImageInfo]:
-        """Render one scene image without letting failures abort the pipeline."""
+        """Render one scene image without letting failures abort the pool.
+
+        Logs wall-clock latency for the scene on both success and failure.
+        Successful renders attach an :class:`ImageResult`; failures attach an
+        ``error`` string on the :class:`Scene` and leave ``image`` as ``None``.
+        """
         prompt = scene.image_prompt or scene.description
+        started = time.perf_counter()
         try:
             with self._metrics.measure(RUNPOD_LATENCY):
                 image = self._image_generator.generate(prompt)
+
+            if not isinstance(image, ImageResult):
+                raise TypeError(
+                    "ImageGenerator.generate must return ImageResult, got "
+                    f"{type(image).__name__}"
+                )
 
             if image.url is None and image.b64:
                 with self._metrics.measure(CLOUDFLARE_UPLOAD_LATENCY):
@@ -291,7 +562,16 @@ class DirectorPipeline:
                     )
                 image = image.model_copy(update={"url": url})
 
+            elapsed = time.perf_counter() - started
             self._metrics.record_images_generated(1)
+            self.logger.info(
+                "event=image_scene_latency scene_id=%s title=%r "
+                "status=ok seconds=%.3f url=%r",
+                scene.id,
+                scene.title,
+                elapsed,
+                image.url,
+            )
             info = GeneratedImageInfo(
                 scene_id=scene.id,
                 title=scene.title,
@@ -299,21 +579,39 @@ class DirectorPipeline:
                 url=image.url,
                 status="ok" if image.url else "Generated (no public URL)",
             )
-            return scene.model_copy(update={"image": image}), info
-        except Exception as exc:  # noqa: BLE001 - keep the studio run alive
+            return (
+                scene.model_copy(update={"image": image, "error": None}),
+                info,
+            )
+        except Exception as exc:  # noqa: BLE001 - keep remaining scenes alive
+            elapsed = time.perf_counter() - started
+            error_message = f"{type(exc).__name__}: {exc}"
             self.logger.exception(
-                "event=image_render_failed scene_id=%s title=%r",
+                "event=image_render_failed scene_id=%s title=%r "
+                "seconds=%.3f error=%s",
                 scene.id,
                 scene.title,
+                elapsed,
+                error_message,
+            )
+            self.logger.info(
+                "event=image_scene_latency scene_id=%s title=%r "
+                "status=failed seconds=%.3f",
+                scene.id,
+                scene.title,
+                elapsed,
             )
             info = GeneratedImageInfo(
                 scene_id=scene.id,
                 title=scene.title,
                 prompt=prompt,
                 url=None,
-                status=f"Failed: {exc}",
+                status=f"Failed: {error_message}",
             )
-            return scene, info
+            return (
+                scene.model_copy(update={"image": None, "error": error_message}),
+                info,
+            )
 
     def _studio_metrics_snapshot(
         self,

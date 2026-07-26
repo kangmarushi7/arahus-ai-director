@@ -238,7 +238,9 @@ class DirectorAgent(BaseAgent[DirectorPlan]):
             research.topic,
         )
 
+        self._log_progress(f"Building director prompt for {cleaned_topic!r}")
         prompt = generate_director_prompt(cleaned_topic, research)
+        self._log_progress(f"Director prompt ready ({len(prompt)} chars)")
         if self.debug:
             self.logger.debug(
                 "event=director_prompt_built agent=DirectorAgent "
@@ -248,6 +250,7 @@ class DirectorAgent(BaseAgent[DirectorPlan]):
             )
 
         try:
+            self._log_progress("Calling director LLM…")
             plan = self._execute(
                 lambda: self._llm_client.generate_json(prompt, DirectorPlan),
                 topic=cleaned_topic,

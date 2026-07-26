@@ -11,6 +11,10 @@ venv/
 .ENV
 .env.*
 
+# Local SQLite databases
+database/*.db
+database/*.db-*
+
 artifacts/
 benchmark_results.json
 benchmark_results.csv
