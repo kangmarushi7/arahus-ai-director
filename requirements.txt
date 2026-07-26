@@ -1,2 +1,10 @@
-# Pin the stable SDK for reproducible production builds.
-runpod==1.10.1
+runpod
+torch
+diffusers
+transformers
+accelerate
+safetensors
+sentencepiece
+protobuf
+Pillow
+huggingface_hub

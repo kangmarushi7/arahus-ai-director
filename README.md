@@ -1,10 +1,33 @@
-# Minimal RunPod Serverless Worker
+# RunPod Serverless SDXL-Turbo Worker
 
-A production-ready Python 3.11 worker that returns:
+Text-to-image worker using Hugging Face Diffusers and `stabilityai/sdxl-turbo`.
+
+## Input
 
 ```json
-{"message": "Hello World"}
+{
+  "input": {
+    "prompt": "A futuristic cyberpunk city"
+  }
+}
 ```
+
+## Output
+
+```json
+{
+  "image": "<base64-encoded PNG>"
+}
+```
+
+The worker also writes `output.png` inside the container.
+
+## Behavior
+
+- Loads the model once at startup and reuses it for every job.
+- Uses `torch.float16` on CUDA when a GPU is available.
+- Falls back to CPU (`float32`) when no GPU is present.
+- Generates one image per request with SDXL-Turbo defaults (`1` step, `guidance_scale=0.0`).
 
 ## Local setup
 
@@ -12,7 +35,7 @@ A production-ready Python 3.11 worker that returns:
 python -m venv .venv
 ```
 
-Activate the virtual environment:
+Activate, then install:
 
 ```bash
 # Linux or macOS
@@ -20,27 +43,21 @@ source .venv/bin/activate
 
 # Windows PowerShell
 .venv\Scripts\Activate.ps1
-```
 
-Install the pinned RunPod SDK and verify the handler:
-
-```bash
 python -m pip install -r requirements.txt
-python -c "from handler import handler; print(handler({}))"
 ```
 
 ## Build the container
 
 ```bash
-docker build -t runpod-hello-worker .
+docker build -t runpod-sdxl-turbo-worker .
 ```
 
-Push the image to a container registry, then configure a RunPod Serverless
-endpoint to use that image. No HTTP framework or exposed port is needed:
-the RunPod SDK starts the worker and receives jobs from the platform.
+Push the image to a registry and attach it to a RunPod Serverless endpoint.
+On first start the worker downloads the model weights into `HF_HOME`.
 
 ## Project files
 
-- `handler.py` defines the job handler and starts the RunPod event loop.
-- `requirements.txt` pins the SDK for reproducible builds.
-- `Dockerfile` creates a small image and runs as a non-root user.
+- `handler.py` — global model load + job handler
+- `requirements.txt` — Diffusers / Torch stack
+- `Dockerfile` — minimal Python 3.11 image

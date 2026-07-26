@@ -10,6 +10,10 @@ venv/
 .env
 .env.*
 
+# Generated images and local model caches
+output.png
+.cache/
+
 # Test and tooling caches
 .pytest_cache/
 .mypy_cache/
