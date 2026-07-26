@@ -12,6 +12,8 @@ venv/
 .env.*
 
 artifacts/
+benchmark_results.json
+benchmark_results.csv
 
 # Test and tooling caches
 .pytest_cache/

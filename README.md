@@ -51,6 +51,24 @@ source .venv/bin/activate
 python -m pip install -r requirements.txt
 ```
 
+### AI Director Studio (UI shell)
+
+```bash
+streamlit run app/dashboard.py
+```
+
+### Benchmark suite
+
+```bash
+python -m tests.benchmark
+python -m reports.report_generator
+```
+
+Runs the full `DirectorPipeline` across 10 historical topics, writes
+`artifacts/benchmark_results.json`, `artifacts/benchmark_results.csv`, and
+`artifacts/report.html`, and prints a summary table (pipeline / research /
+director / prompt / review / image timings, review score, image count).
+
 ## Build the container
 
 ```bash
@@ -64,14 +82,16 @@ On first start the worker downloads the model weights into `HF_HOME`.
 
 ```
 handler.py            RunPod worker entry point (global model load + job handler)
+app/
+└── dashboard.py      Streamlit AI Director Studio (UI shell)
 src/
-├── config.py         OpenRouter models and sampling (from env)
-├── agents/           research.py, director.py, prompt.py
+├── config.py         Nested Pydantic Settings (from env / .env)
+├── agents/           research.py, director.py, prompt.py, review.py
 ├── services/         llm.py, llm_factory.py, runpod.py, r2.py
-├── models/           research.py, storyboard.py, image.py
+├── models/           research.py, storyboard.py, image.py, review.py
 ├── pipeline.py       DirectorPipeline orchestration
 └── api.py            composition root
-requirements.txt      Diffusers / Torch stack
+requirements.txt      Diffusers / Torch stack + Streamlit
 Dockerfile            minimal Python 3.11 image
 ```
 

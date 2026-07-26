@@ -1,8 +1,7 @@
 """In-memory metrics collection for the AI Director pipeline.
 
-Tracks latency for LLM, RunPod, and R2 calls, token usage and estimated cost,
-image counts, and overall pipeline duration. Everything is kept in process
-memory and can be exported as JSON.
+Tracks stage latencies, token usage, estimated cost, image counts, and retries.
+Everything is kept in process memory and can be exported as JSON.
 """
 
 from __future__ import annotations
@@ -13,19 +12,32 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Iterator
 
-# Metric names for the three timed external dependencies.
-LLM_LATENCY = "llm_latency"
+# Stage and dependency latency metric names.
+RESEARCH_LATENCY = "research_latency"
+DIRECTOR_LATENCY = "director_latency"
+PROMPT_LATENCY = "prompt_latency"
+REVIEW_LATENCY = "review_latency"
 RUNPOD_LATENCY = "runpod_latency"
-R2_UPLOAD_LATENCY = "r2_upload_latency"
-PIPELINE_DURATION = "pipeline_duration"
+CLOUDFLARE_UPLOAD_LATENCY = "cloudflare_upload_latency"
+TOTAL_LATENCY = "total_latency"
+
+# Backward-compatible aliases used by earlier pipeline/dashboard code.
+R2_UPLOAD_LATENCY = CLOUDFLARE_UPLOAD_LATENCY
+PIPELINE_DURATION = TOTAL_LATENCY
+LLM_LATENCY = "llm_latency"
 
 _LATENCY_METRICS = (
-    LLM_LATENCY,
+    RESEARCH_LATENCY,
+    DIRECTOR_LATENCY,
+    PROMPT_LATENCY,
+    REVIEW_LATENCY,
     RUNPOD_LATENCY,
-    R2_UPLOAD_LATENCY,
-    PIPELINE_DURATION,
+    CLOUDFLARE_UPLOAD_LATENCY,
+    TOTAL_LATENCY,
+    LLM_LATENCY,
 )
 
 
@@ -93,29 +105,56 @@ class MetricsCollector:
         self._completion_tokens = 0
         self._estimated_cost = 0.0
         self._images_generated = 0
+        self._retry_count = 0
 
     # Latency recording ---------------------------------------------------
 
-    def record_llm_latency(self, seconds: float) -> None:
-        """Record one LLM request duration in seconds."""
-        self._record_latency(LLM_LATENCY, seconds)
+    def record_research_latency(self, seconds: float) -> None:
+        """Record research-agent latency in seconds."""
+        self._record_latency(RESEARCH_LATENCY, seconds)
+
+    def record_director_latency(self, seconds: float) -> None:
+        """Record director-agent latency in seconds."""
+        self._record_latency(DIRECTOR_LATENCY, seconds)
+
+    def record_prompt_latency(self, seconds: float) -> None:
+        """Record prompt-agent latency in seconds."""
+        self._record_latency(PROMPT_LATENCY, seconds)
+
+    def record_review_latency(self, seconds: float) -> None:
+        """Record review-agent latency in seconds."""
+        self._record_latency(REVIEW_LATENCY, seconds)
 
     def record_runpod_latency(self, seconds: float) -> None:
-        """Record one RunPod request duration in seconds."""
+        """Record RunPod image-generation latency in seconds."""
         self._record_latency(RUNPOD_LATENCY, seconds)
 
+    def record_cloudflare_upload_latency(self, seconds: float) -> None:
+        """Record Cloudflare R2 upload latency in seconds."""
+        self._record_latency(CLOUDFLARE_UPLOAD_LATENCY, seconds)
+
     def record_r2_upload_latency(self, seconds: float) -> None:
-        """Record one R2 upload duration in seconds."""
-        self._record_latency(R2_UPLOAD_LATENCY, seconds)
+        """Alias for :meth:`record_cloudflare_upload_latency`."""
+        self.record_cloudflare_upload_latency(seconds)
+
+    def record_total_latency(self, seconds: float) -> None:
+        """Record end-to-end pipeline latency in seconds."""
+        self._record_latency(TOTAL_LATENCY, seconds)
 
     def record_pipeline_duration(self, seconds: float) -> None:
-        """Record one end-to-end pipeline run duration in seconds."""
-        self._record_latency(PIPELINE_DURATION, seconds)
+        """Alias for :meth:`record_total_latency`."""
+        self.record_total_latency(seconds)
+
+    def record_llm_latency(self, seconds: float) -> None:
+        """Record a generic LLM latency sample (legacy aggregate)."""
+        self._record_latency(LLM_LATENCY, seconds)
 
     def _record_latency(self, metric: str, seconds: float) -> None:
         """Append a duration sample to ``metric``."""
         if seconds < 0:
             raise ValueError("latency must be non-negative")
+        if metric not in self._latencies:
+            raise ValueError(f"unknown latency metric: {metric}")
         with self._lock:
             self._latencies[metric].record(float(seconds))
 
@@ -166,6 +205,13 @@ class MetricsCollector:
         with self._lock:
             self._images_generated += count
 
+    def record_retry(self, count: int = 1) -> None:
+        """Increase the storyboard/review retry counter."""
+        if count < 0:
+            raise ValueError("retry count must be non-negative")
+        with self._lock:
+            self._retry_count += count
+
     # Accessors -----------------------------------------------------------
 
     @property
@@ -181,6 +227,12 @@ class MetricsCollector:
             return self._completion_tokens
 
     @property
+    def total_tokens(self) -> int:
+        """Sum of prompt and completion tokens."""
+        with self._lock:
+            return self._prompt_tokens + self._completion_tokens
+
+    @property
     def estimated_cost(self) -> float:
         """Total estimated cost recorded."""
         with self._lock:
@@ -192,6 +244,12 @@ class MetricsCollector:
         with self._lock:
             return self._images_generated
 
+    @property
+    def retry_count(self) -> int:
+        """Total retry attempts recorded."""
+        with self._lock:
+            return self._retry_count
+
     def snapshot(self, *, include_samples: bool = False) -> dict[str, Any]:
         """Return all metrics as a JSON-serializable dictionary.
 
@@ -199,15 +257,26 @@ class MetricsCollector:
             include_samples: When ``True``, include every raw latency sample.
 
         Returns:
-            A dictionary with latency, token, cost, and image metrics.
+            A dictionary with latency, token, cost, image, and retry metrics.
         """
         with self._lock:
+            latency = {
+                name: series.to_dict(include_samples=include_samples)
+                for name, series in self._latencies.items()
+            }
             return {
                 "started_at": self._started_at,
                 "exported_at": _utc_now_iso(),
                 "latency": {
-                    name: series.to_dict(include_samples=include_samples)
-                    for name, series in self._latencies.items()
+                    "research_latency": latency[RESEARCH_LATENCY],
+                    "director_latency": latency[DIRECTOR_LATENCY],
+                    "prompt_latency": latency[PROMPT_LATENCY],
+                    "review_latency": latency[REVIEW_LATENCY],
+                    "runpod_latency": latency[RUNPOD_LATENCY],
+                    "cloudflare_upload_latency": latency[CLOUDFLARE_UPLOAD_LATENCY],
+                    "total_latency": latency[TOTAL_LATENCY],
+                    # Legacy aggregate kept for older dashboard keys.
+                    "llm_latency": latency[LLM_LATENCY],
                 },
                 "tokens": {
                     "prompt_tokens": self._prompt_tokens,
@@ -215,7 +284,9 @@ class MetricsCollector:
                     "total_tokens": self._prompt_tokens + self._completion_tokens,
                 },
                 "estimated_cost": round(self._estimated_cost, 6),
+                "image_count": self._images_generated,
                 "images_generated": self._images_generated,
+                "retry_count": self._retry_count,
             }
 
     def to_json(
@@ -231,6 +302,22 @@ class MetricsCollector:
             ensure_ascii=False,
         )
 
+    def export_json(
+        self,
+        path: str | Path,
+        *,
+        include_samples: bool = False,
+        indent: int | None = 2,
+    ) -> Path:
+        """Write metrics JSON to ``path`` and return the written path."""
+        destination = Path(path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(
+            self.to_json(include_samples=include_samples, indent=indent),
+            encoding="utf-8",
+        )
+        return destination
+
     def reset(self) -> None:
         """Clear every counter and latency series."""
         with self._lock:
@@ -240,3 +327,4 @@ class MetricsCollector:
             self._completion_tokens = 0
             self._estimated_cost = 0.0
             self._images_generated = 0
+            self._retry_count = 0
