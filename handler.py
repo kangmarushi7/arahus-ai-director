@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import base64
-from io import BytesIO
 from typing import Any
 
 import runpod
 import torch
 from diffusers import AutoPipelineForText2Image
-from PIL import Image
+
+from storage import upload_image
 
 # Model is loaded once at cold start and reused across jobs.
 MODEL_ID = "stabilityai/sdxl-turbo"
@@ -31,15 +30,8 @@ if DEVICE == "cuda":
 print("Model ready")
 
 
-def image_to_base64(image: Image.Image) -> str:
-    """Encode a PIL image as a base64 PNG string."""
-    buffer = BytesIO()
-    image.save(buffer, format="PNG")
-    return base64.b64encode(buffer.getvalue()).decode("utf-8")
-
-
 def handler(job: dict[str, Any]) -> dict[str, Any]:
-    """Generate N images from a text prompt and return them as base64 PNGs."""
+    """Generate N images and return public Cloudflare R2 URLs."""
     job_input = job.get("input") or {}
     prompt = job_input.get("prompt")
     num_images = job_input.get("num_images", DEFAULT_NUM_IMAGES)
@@ -59,7 +51,8 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
             guidance_scale=0.0,
         ).images[0]
 
-        images.append(image_to_base64(image))
+        url = upload_image(image)
+        images.append(url)
 
     return {"images": images}
 
