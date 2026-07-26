@@ -9,3 +9,6 @@ protobuf
 Pillow
 huggingface_hub
 boto3
+pydantic
+pydantic-settings
+openai

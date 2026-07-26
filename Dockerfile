@@ -13,7 +13,7 @@ COPY requirements.txt .
 RUN python -m pip install --no-cache-dir --requirement requirements.txt
 
 COPY handler.py .
-COPY storage.py .
+COPY src/ ./src/
 
 RUN useradd --create-home --uid 10001 worker \
     && mkdir -p /app/.cache/huggingface \

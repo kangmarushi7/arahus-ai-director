@@ -8,11 +8,10 @@ venv/
 
 # Local configuration and secrets
 .env
+.ENV
 .env.*
 
-# Generated images and local model caches
-output.png
-.cache/
+artifacts/
 
 # Test and tooling caches
 .pytest_cache/

@@ -8,7 +8,7 @@ import runpod
 import torch
 from diffusers import AutoPipelineForText2Image
 
-from storage import upload_image
+from src.services.r2 import upload_image
 
 # Model is loaded once at cold start and reused across jobs.
 MODEL_ID = "stabilityai/sdxl-turbo"
