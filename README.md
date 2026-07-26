@@ -7,27 +7,33 @@ Text-to-image worker using Hugging Face Diffusers and `stabilityai/sdxl-turbo`.
 ```json
 {
   "input": {
-    "prompt": "A futuristic cyberpunk city"
+    "prompt": "A futuristic cyberpunk city",
+    "num_images": 4
   }
 }
 ```
+
+`num_images` defaults to `4` when omitted.
 
 ## Output
 
 ```json
 {
-  "image": "<base64-encoded PNG>"
+  "images": [
+    "<base64-encoded PNG>",
+    "<base64-encoded PNG>",
+    "<base64-encoded PNG>",
+    "<base64-encoded PNG>"
+  ]
 }
 ```
-
-The worker also writes `output.png` inside the container.
 
 ## Behavior
 
 - Loads the model once at startup and reuses it for every job.
 - Uses `torch.float16` on CUDA when a GPU is available.
 - Falls back to CPU (`float32`) when no GPU is present.
-- Generates one image per request with SDXL-Turbo defaults (`1` step, `guidance_scale=0.0`).
+- Generates N images in one pipeline call with SDXL-Turbo defaults (`1` step, `guidance_scale=0.0`).
 
 ## Local setup
 
