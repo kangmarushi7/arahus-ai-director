@@ -13,7 +13,7 @@ from PIL import Image
 
 # Model is loaded once at cold start and reused across jobs.
 MODEL_ID = "stabilityai/sdxl-turbo"
-DEFAULT_NUM_IMAGES = 4
+DEFAULT_NUM_IMAGES = 2
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DTYPE = torch.float16 if DEVICE == "cuda" else torch.float32
@@ -50,15 +50,18 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(num_images, int) or num_images < 1:
         return {"error": "num_images must be a positive integer"}
 
-    # One pipeline call generates all images; SDXL-Turbo uses 1 step + no guidance.
-    result = pipe(
-        prompt=prompt.strip(),
-        num_inference_steps=1,
-        guidance_scale=0.0,
-        num_images_per_prompt=num_images,
-    )
+    images = []
 
-    return {"images": [image_to_base64(image) for image in result.images]}
+    for _ in range(num_images):
+        image = pipe(
+            prompt=prompt.strip(),
+            num_inference_steps=1,
+            guidance_scale=0.0,
+        ).images[0]
+
+        images.append(image_to_base64(image))
+
+    return {"images": images}
 
 
 if __name__ == "__main__":
