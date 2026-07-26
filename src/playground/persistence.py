@@ -1,25 +1,24 @@
-"""Persist storyboard scenes into SQLite for the prompt playground."""
+"""Persist storyboard scenes into PostgreSQL for the prompt playground."""
 
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import Any, Mapping
 
-from sqlalchemy import select
-from sqlalchemy.orm import selectinload
-
-from src.database.database import Image as ImageRow
-from src.database.database import Project
-from src.database.database import PromptVersion as PromptVersionRow
-from src.database.database import Scene as SceneRow
-from src.database.database import create_database, get_session
+from src.database.models import ImageStatus, ProjectStatus
+from src.database.session import create_database, get_session
 from src.models.pipeline import PipelineResult
+from src.repositories.image_repository import ImageRepository
+from src.repositories.project_repository import ProjectRepository
+from src.repositories.prompt_version_repository import PromptVersionRepository
+from src.repositories.scene_repository import SceneRepository
 
 logger = logging.getLogger(__name__)
 
 
 def ensure_database() -> None:
-    """Create the SQLite schema when missing."""
+    """Create ORM tables when missing (prefer Alembic in production)."""
     create_database()
 
 
@@ -27,9 +26,9 @@ def sync_storyboard_project(
     topic: str,
     scenes: list[Mapping[str, Any]],
     *,
-    project_id: int | None = None,
+    project_id: uuid.UUID | str | None = None,
     image_model: str = "stabilityai/sdxl-turbo",
-) -> tuple[int, dict[int, int]]:
+) -> tuple[uuid.UUID, dict[int, uuid.UUID]]:
     """Upsert a project + scenes for playground editing.
 
     Args:
@@ -44,32 +43,31 @@ def sync_storyboard_project(
     """
     ensure_database()
     cleaned_topic = " ".join(str(topic).split()) or "Untitled project"
-    mapping: dict[int, int] = {}
+    mapping: dict[int, uuid.UUID] = {}
+    existing_id = _parse_uuid(project_id) if project_id is not None else None
 
     with get_session() as session:
-        project: Project | None = None
-        if project_id is not None:
-            project = session.get(Project, project_id)
+        projects = ProjectRepository(session)
+        scenes_repo = SceneRepository(session)
+        prompts = PromptVersionRepository(session)
+        images = ImageRepository(session)
 
+        project = projects.get(existing_id) if existing_id is not None else None
         if project is None:
-            project = Project(topic=cleaned_topic, status="playground")
-            session.add(project)
-            session.flush()
+            project = projects.create(
+                topic=cleaned_topic,
+                status=ProjectStatus.PLAYGROUND,
+            )
         else:
-            project.topic = cleaned_topic
-            project.status = "playground"
+            projects.update(
+                project,
+                topic=cleaned_topic,
+                status=ProjectStatus.PLAYGROUND,
+            )
 
-        existing_by_number = {
-            scene.scene_number: scene
-            for scene in session.scalars(
-                select(SceneRow)
-                .where(SceneRow.project_id == project.id)
-                .options(
-                    selectinload(SceneRow.prompt_versions).selectinload(
-                        PromptVersionRow.images
-                    )
-                )
-            ).all()
+        existing_scenes = {
+            row.scene_number: row
+            for row in scenes_repo.list(project_id=project.id, limit=10_000)
         }
 
         for raw in scenes:
@@ -84,62 +82,56 @@ def sync_storyboard_project(
             image_url = None
             if isinstance(image_payload, dict):
                 image_url = image_payload.get("url")
-            # Prefer pipeline GeneratedImageInfo style if present on a parallel list —
-            # callers may also pass url at the top level.
             if not image_url:
                 image_url = raw.get("url")
 
-            scene = existing_by_number.get(scene_number)
+            scene = existing_scenes.get(scene_number)
             if scene is None:
-                scene = SceneRow(
+                scene = scenes_repo.create(
                     project_id=project.id,
                     scene_number=scene_number,
                     title=title,
                     description=description,
                 )
-                session.add(scene)
-                session.flush()
+                existing_scenes[scene_number] = scene
             else:
-                scene.title = title
-                scene.description = description
+                scenes_repo.update(
+                    scene,
+                    title=title,
+                    description=description,
+                )
 
             mapping[scene_number] = scene.id
 
             if prompt and not scene.prompt_versions:
-                version = PromptVersionRow(
+                version = prompts.create(
                     scene_id=scene.id,
-                    version=1,
                     prompt_text=prompt,
                     model=image_model,
+                    version=1,
                     is_selected=True,
                 )
-                session.add(version)
-                session.flush()
                 if isinstance(image_url, str) and image_url.strip():
-                    session.add(
-                        ImageRow(
-                            prompt_version_id=version.id,
-                            url=image_url.strip(),
-                            status="ok",
-                        )
+                    images.create(
+                        prompt_version_id=version.id,
+                        url=image_url.strip(),
+                        status=ImageStatus.OK,
                     )
 
-        session.flush()
-        project_pk = int(project.id)
         logger.info(
             "event=storyboard_synced project_id=%s scenes=%s",
-            project_pk,
+            project.id,
             mapping,
         )
-        return project_pk, mapping
+        return project.id, mapping
 
 
 def sync_pipeline_result(
     result: PipelineResult,
     *,
-    project_id: int | None = None,
+    project_id: uuid.UUID | str | None = None,
     image_model: str = "stabilityai/sdxl-turbo",
-) -> tuple[int, dict[int, int]]:
+) -> tuple[uuid.UUID, dict[int, uuid.UUID]]:
     """Persist a completed pipeline storyboard for per-scene playground edits."""
     url_by_scene = {
         int(item.scene_id): item.url
@@ -158,3 +150,9 @@ def sync_pipeline_result(
         project_id=project_id,
         image_model=image_model,
     )
+
+
+def _parse_uuid(value: uuid.UUID | str) -> uuid.UUID:
+    if isinstance(value, uuid.UUID):
+        return value
+    return uuid.UUID(str(value))

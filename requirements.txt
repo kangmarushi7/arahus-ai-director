@@ -13,5 +13,8 @@ pydantic
 pydantic-settings
 openai
 requests
-SQLAlchemy
+sqlalchemy
+psycopg[binary]
+alembic
+python-dotenv
 streamlit

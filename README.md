@@ -83,16 +83,21 @@ On first start the worker downloads the model weights into `HF_HOME`.
 ```
 handler.py            RunPod worker entry point (global model load + job handler)
 app/
-└── dashboard.py      Streamlit AI Director Studio (UI shell)
+└── dashboard.py      Streamlit AI Director Studio
 src/
 ├── config.py         Nested Pydantic Settings (from env / .env)
-├── agents/           research.py, director.py, prompt.py, review.py
-├── services/         llm.py, llm_factory.py, runpod.py, r2.py
-├── models/           research.py, storyboard.py, image.py, review.py
+├── agents/           research, director, prompt, review
+├── services/         llm, runpod, r2, …
+├── models/           Pydantic domain models
+├── database/         base.py, session.py, models.py (SQLAlchemy ORM)
+├── repositories/     project, scene, prompt data-access layer
+├── playground/       prompt playground service
 ├── pipeline.py       DirectorPipeline orchestration
 └── api.py            composition root
-requirements.txt      Diffusers / Torch stack + Streamlit
-Dockerfile            minimal Python 3.11 image
+alembic/              PostgreSQL migrations
+alembic.ini
+requirements.txt
+Dockerfile
 ```
 
 ## Pipeline
@@ -147,6 +152,9 @@ R2_SECRET_ACCESS_KEY=...
 R2_BUCKET=...
 R2_ENDPOINT=...
 R2_PUBLIC_URL=...
+
+# Database (PostgreSQL / Neon)
+DATABASE_URL=postgresql://USER:PASSWORD@HOST/DB?sslmode=require
 
 # Monitoring
 METRICS_ENABLED=true                               # optional

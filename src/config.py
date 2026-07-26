@@ -178,6 +178,19 @@ class MonitoringConfig(_SectionSettings):
     export_path: str = Field(default="", validation_alias="METRICS_EXPORT_PATH")
 
 
+class DatabaseConfig(_SectionSettings):
+    """PostgreSQL connection settings (Neon and other providers)."""
+
+    url: SecretStr = Field(default=SecretStr(""), validation_alias="DATABASE_URL")
+
+    def require_url(self) -> str:
+        """Return ``DATABASE_URL`` or raise when it is missing."""
+        value = self.url.get_secret_value().strip()
+        if not value:
+            raise RuntimeError("Missing required environment variable: DATABASE_URL")
+        return value
+
+
 class AppConfig(BaseSettings):
     """Root application configuration composed of nested sections.
 
@@ -200,6 +213,7 @@ class AppConfig(BaseSettings):
     storage: StorageConfig = Field(default_factory=StorageConfig)
     pipeline: PipelineConfig = Field(default_factory=PipelineConfig)
     monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
+    database: DatabaseConfig = Field(default_factory=DatabaseConfig)
 
 
 @lru_cache(maxsize=1)
@@ -215,6 +229,7 @@ def get_settings() -> AppConfig:
         storage=StorageConfig(),
         pipeline=PipelineConfig(),
         monitoring=MonitoringConfig(),
+        database=DatabaseConfig(),
     )
 
 

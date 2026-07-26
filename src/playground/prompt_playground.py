@@ -1,28 +1,32 @@
 """Prompt playground service for iterative prompt versions and image previews.
 
 Creates prompt versions, generates images via an injected
-:class:`~src.pipeline.ImageGenerator`, persists results, and tracks the
-selected version per scene. Returns Pydantic models only — no UI code.
+:class:`~src.pipeline.ImageGenerator`, persists results through repositories,
+and tracks the selected version per scene. Returns Pydantic models only.
 """
 
 from __future__ import annotations
 
 import logging
+import uuid
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from datetime import datetime
 from typing import TYPE_CHECKING
 
 from pydantic import Field
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session
 
-from src.database.database import Image as ImageRow
-from src.database.database import PromptVersion as PromptVersionRow
-from src.database.database import Scene as SceneRow
-from src.database.database import get_session
+from src.database.models import Image as ImageRow
+from src.database.models import ImageStatus
+from src.database.models import PromptVersion as PromptVersionRow
+from src.database.models import PromptVersionStatus
+from src.database.session import get_session
 from src.models.base import StrictModel
 from src.models.image import ImageResult
+from src.repositories.image_repository import ImageRepository
+from src.repositories.prompt_version_repository import PromptVersionRepository
+from src.repositories.scene_repository import SceneRepository
 
 if TYPE_CHECKING:
     from src.pipeline import ImageGenerator
@@ -43,8 +47,8 @@ class PromptPlaygroundNotFoundError(PromptPlaygroundError):
 class ImageRecord(StrictModel):
     """Persisted image row returned by the playground."""
 
-    id: int
-    prompt_version_id: int
+    id: uuid.UUID
+    prompt_version_id: uuid.UUID
     url: str | None = None
     status: str
     error: str | None = None
@@ -57,8 +61,8 @@ class ImageRecord(StrictModel):
 class PromptVersionRecord(StrictModel):
     """Persisted prompt-version row returned by the playground."""
 
-    id: int
-    scene_id: int
+    id: uuid.UUID
+    scene_id: uuid.UUID
     version: int = Field(ge=1)
     prompt: str
     model: str
@@ -71,7 +75,8 @@ class PromptPlayground:
     """Service for creating, rendering, selecting, and deleting prompt versions.
 
     Dependencies are injected so the playground stays testable and free of
-    Streamlit or composition-root concerns.
+    Streamlit or composition-root concerns. Persistence goes through
+    repository classes — not raw SQLAlchemy queries in the service methods.
     """
 
     def __init__(
@@ -85,7 +90,7 @@ class PromptPlayground:
             image_generator: Renders a prompt into an :class:`ImageResult`.
             session_factory: Context manager factory that yields a SQLAlchemy
                 :class:`~sqlalchemy.orm.Session`. Defaults to
-                :func:`~src.database.database.get_session`.
+                :func:`~src.database.session.get_session`.
         """
         if image_generator is None:
             raise ValueError("image_generator is required")
@@ -95,53 +100,34 @@ class PromptPlayground:
 
     def create_prompt_version(
         self,
-        scene_id: int,
+        scene_id: uuid.UUID | str,
         prompt: str,
         model: str,
     ) -> PromptVersionRecord:
-        """Create the next prompt version for ``scene_id``.
-
-        Args:
-            scene_id: Existing scene primary key.
-            prompt: Image-prompt text for this version.
-            model: Model identifier used to author or target the prompt.
-
-        Returns:
-            The newly created :class:`PromptVersionRecord`.
-
-        Raises:
-            ValueError: If ``prompt`` or ``model`` is empty.
-            PromptPlaygroundNotFoundError: If the scene does not exist.
-        """
+        """Create the next prompt version for ``scene_id``."""
         cleaned_prompt = _require_non_empty(prompt, field_name="prompt")
         cleaned_model = _require_non_empty(model, field_name="model")
-        scene_pk = _require_positive_id(scene_id, field_name="scene_id")
+        scene_pk = _parse_uuid(scene_id, field_name="scene_id")
 
         with self._session_factory() as session:
-            scene = session.get(SceneRow, scene_pk)
-            if scene is None:
+            scenes = SceneRepository(session)
+            prompts = PromptVersionRepository(session)
+            if scenes.get(scene_pk) is None:
                 raise PromptPlaygroundNotFoundError(
                     f"Scene id={scene_pk} was not found"
                 )
 
-            next_version = (
-                session.scalar(
-                    select(func.coalesce(func.max(PromptVersionRow.version), 0)).where(
-                        PromptVersionRow.scene_id == scene_pk
-                    )
-                )
-                or 0
-            ) + 1
+            existing = prompts.list(scene_id=scene_pk, limit=10_000)
+            next_version = (max((row.version for row in existing), default=0) + 1)
 
-            row = PromptVersionRow(
+            row = prompts.create(
                 scene_id=scene_pk,
-                version=next_version,
                 prompt_text=cleaned_prompt,
                 model=cleaned_model,
+                version=next_version,
+                status=PromptVersionStatus.DRAFT,
                 is_selected=False,
             )
-            session.add(row)
-            session.flush()
             session.refresh(row)
             record = _prompt_version_to_model(row)
             logger.info(
@@ -154,29 +140,17 @@ class PromptPlayground:
             )
             return record
 
-    def generate_image(self, prompt_version_id: int) -> ImageRecord:
-        """Generate an image for ``prompt_version_id`` and persist it.
-
-        On generator failure, a ``failed`` image row is still stored and
-        returned so the UI can show the error without losing history.
-
-        Args:
-            prompt_version_id: Prompt-version primary key.
-
-        Returns:
-            The stored :class:`ImageRecord`.
-
-        Raises:
-            PromptPlaygroundNotFoundError: If the prompt version does not exist.
-            PromptPlaygroundError: If the generator returns an invalid type.
-        """
-        version_pk = _require_positive_id(
+    def generate_image(self, prompt_version_id: uuid.UUID | str) -> ImageRecord:
+        """Generate an image for ``prompt_version_id`` and persist it."""
+        version_pk = _parse_uuid(
             prompt_version_id,
             field_name="prompt_version_id",
         )
 
         with self._session_factory() as session:
-            version = session.get(PromptVersionRow, version_pk)
+            prompts = PromptVersionRepository(session)
+            images = ImageRepository(session)
+            version = prompts.get(version_pk)
             if version is None:
                 raise PromptPlaygroundNotFoundError(
                     f"PromptVersion id={version_pk} was not found"
@@ -193,14 +167,12 @@ class PromptPlayground:
             try:
                 result = self._image_generator.generate(prompt_text)
             except Exception as exc:  # noqa: BLE001 - persist failure status
-                image_row = ImageRow(
+                image_row = images.create(
                     prompt_version_id=version_pk,
                     url=None,
-                    status="failed",
+                    status=ImageStatus.FAILED,
                     error=f"{type(exc).__name__}: {exc}",
                 )
-                session.add(image_row)
-                session.flush()
                 session.refresh(image_row)
                 logger.exception(
                     "event=prompt_playground_generate_failed version_id=%s",
@@ -214,17 +186,15 @@ class PromptPlayground:
                     f"{type(result).__name__}"
                 )
 
-            image_row = ImageRow(
+            image_row = images.create(
                 prompt_version_id=version_pk,
                 url=result.url,
-                status="ok" if result.url else "generated_no_url",
+                status=ImageStatus.OK if result.url else ImageStatus.GENERATED_NO_URL,
                 error=None,
                 width=result.width,
                 height=result.height,
                 seed=result.seed,
             )
-            session.add(image_row)
-            session.flush()
             session.refresh(image_row)
             record = _image_to_model(image_row)
             logger.info(
@@ -236,45 +206,35 @@ class PromptPlayground:
             )
             return record
 
-    def select_version(self, prompt_version_id: int) -> PromptVersionRecord:
-        """Mark ``prompt_version_id`` as the selected version for its scene.
-
-        Clears ``is_selected`` on sibling versions for the same scene.
-
-        Args:
-            prompt_version_id: Prompt-version primary key to select.
-
-        Returns:
-            The updated :class:`PromptVersionRecord` including images.
-
-        Raises:
-            PromptPlaygroundNotFoundError: If the prompt version does not exist.
-        """
-        version_pk = _require_positive_id(
+    def select_version(self, prompt_version_id: uuid.UUID | str) -> PromptVersionRecord:
+        """Mark ``prompt_version_id`` as the selected version for its scene."""
+        version_pk = _parse_uuid(
             prompt_version_id,
             field_name="prompt_version_id",
         )
 
         with self._session_factory() as session:
-            version = session.scalar(
-                select(PromptVersionRow)
-                .where(PromptVersionRow.id == version_pk)
-                .options(selectinload(PromptVersionRow.images))
-            )
+            prompts = PromptVersionRepository(session)
+            version = prompts.get(version_pk)
             if version is None:
                 raise PromptPlaygroundNotFoundError(
                     f"PromptVersion id={version_pk} was not found"
                 )
 
-            siblings = session.scalars(
-                select(PromptVersionRow).where(
-                    PromptVersionRow.scene_id == version.scene_id
-                )
-            ).all()
+            siblings = prompts.list(scene_id=version.scene_id, limit=10_000)
             for sibling in siblings:
-                sibling.is_selected = sibling.id == version_pk
+                if sibling.is_selected and sibling.id != version.id:
+                    prompts.update(
+                        sibling,
+                        is_selected=False,
+                        status=PromptVersionStatus.SUPERSEDED,
+                    )
 
-            session.flush()
+            version = prompts.update(
+                version,
+                is_selected=True,
+                status=PromptVersionStatus.ACTIVE,
+            )
             session.refresh(version)
             record = _prompt_version_to_model(version)
             logger.info(
@@ -284,65 +244,37 @@ class PromptPlayground:
             )
             return record
 
-    def list_versions(self, scene_id: int) -> list[PromptVersionRecord]:
-        """List all prompt versions for ``scene_id`` (oldest → newest).
-
-        Args:
-            scene_id: Scene primary key.
-
-        Returns:
-            Ordered list of :class:`PromptVersionRecord` objects with images.
-
-        Raises:
-            PromptPlaygroundNotFoundError: If the scene does not exist.
-        """
-        scene_pk = _require_positive_id(scene_id, field_name="scene_id")
+    def list_versions(self, scene_id: uuid.UUID | str) -> list[PromptVersionRecord]:
+        """List all prompt versions for ``scene_id`` (oldest → newest)."""
+        scene_pk = _parse_uuid(scene_id, field_name="scene_id")
 
         with self._session_factory() as session:
-            scene = session.get(SceneRow, scene_pk)
-            if scene is None:
+            scenes = SceneRepository(session)
+            prompts = PromptVersionRepository(session)
+            if scenes.get(scene_pk) is None:
                 raise PromptPlaygroundNotFoundError(
                     f"Scene id={scene_pk} was not found"
                 )
-
-            rows = session.scalars(
-                select(PromptVersionRow)
-                .where(PromptVersionRow.scene_id == scene_pk)
-                .options(selectinload(PromptVersionRow.images))
-                .order_by(PromptVersionRow.version.asc())
-            ).all()
+            rows = prompts.list(scene_id=scene_pk, limit=10_000)
             return [_prompt_version_to_model(row) for row in rows]
 
-    def delete_version(self, prompt_version_id: int) -> PromptVersionRecord:
-        """Delete ``prompt_version_id`` and its cascaded images.
-
-        Args:
-            prompt_version_id: Prompt-version primary key.
-
-        Returns:
-            A snapshot of the deleted :class:`PromptVersionRecord`.
-
-        Raises:
-            PromptPlaygroundNotFoundError: If the prompt version does not exist.
-        """
-        version_pk = _require_positive_id(
+    def delete_version(self, prompt_version_id: uuid.UUID | str) -> PromptVersionRecord:
+        """Delete ``prompt_version_id`` and its cascaded images."""
+        version_pk = _parse_uuid(
             prompt_version_id,
             field_name="prompt_version_id",
         )
 
         with self._session_factory() as session:
-            version = session.scalar(
-                select(PromptVersionRow)
-                .where(PromptVersionRow.id == version_pk)
-                .options(selectinload(PromptVersionRow.images))
-            )
+            prompts = PromptVersionRepository(session)
+            version = prompts.get(version_pk)
             if version is None:
                 raise PromptPlaygroundNotFoundError(
                     f"PromptVersion id={version_pk} was not found"
                 )
-
+            # Touch relationship so the snapshot includes images before delete.
             snapshot = _prompt_version_to_model(version)
-            session.delete(version)
+            prompts.delete(version)
             logger.info(
                 "event=prompt_version_deleted version_id=%s scene_id=%s",
                 version_pk,
@@ -357,18 +289,22 @@ def _require_non_empty(value: str, *, field_name: str) -> str:
     return value.strip()
 
 
-def _require_positive_id(value: int, *, field_name: str) -> int:
-    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
-        raise ValueError(f"{field_name} must be a positive integer")
-    return value
+def _parse_uuid(value: uuid.UUID | str, *, field_name: str) -> uuid.UUID:
+    if isinstance(value, uuid.UUID):
+        return value
+    try:
+        return uuid.UUID(str(value))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be a valid UUID") from exc
 
 
 def _image_to_model(row: ImageRow) -> ImageRecord:
+    status = row.status.value if hasattr(row.status, "value") else str(row.status)
     return ImageRecord(
         id=row.id,
         prompt_version_id=row.prompt_version_id,
         url=row.url,
-        status=row.status,
+        status=status,
         error=row.error,
         width=row.width,
         height=row.height,
