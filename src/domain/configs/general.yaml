@@ -1,0 +1,40 @@
+domain: general
+
+style: >
+  cinematic realism, balanced natural color, soft contrast,
+  versatile contemporary look suitable for mixed topics
+
+camera: >
+  35mm cinematic, eye-level framing, gentle motivated camera moves,
+  medium-wide storytelling coverage
+
+lighting: >
+  natural soft key light, gentle fill, moderate contrast, adaptable day or interior
+
+color_palette: >
+  natural balanced tones, soft neutrals, mild warm or cool bias as scene requires
+
+composition: >
+  clear subject focus, rule of thirds, readable environment, uncluttered storytelling
+
+quality_tags:
+  - highly detailed
+  - sharp focus
+  - cinematic still
+  - photorealistic
+
+negative_prompt: >
+  low quality, blurry, watermark, text, deformed, extra limbs, cartoon, anime
+
+image_model_defaults:
+  width: 1024
+  height: 1024
+  steps: 28
+  guidance_scale: 3.5
+  scheduler: default
+
+video_model_defaults:
+  fps: 24
+  duration_seconds: 4
+  motion_strength: 0.35
+  camera_motion: gentle_move

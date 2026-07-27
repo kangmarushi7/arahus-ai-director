@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
-from pydantic import Field
+from typing import Any
+
+from pydantic import Field, model_validator
 
 from src.models.base import StrictModel
+from src.models.research_normalize import normalize_research_payload
 
 
 class ResearchResult(StrictModel):
-    """Factual reference material produced by the research agent."""
+    """Factual reference material produced by the research agent.
+
+    Only ``topic`` is required. All other fields default to empty values so
+    heterogeneous LLM JSON can be normalized before validation.
+    """
 
     topic: str
     time_period: str = ""
@@ -21,3 +28,11 @@ class ResearchResult(StrictModel):
     important_events: list[str] = Field(default_factory=list)
     visual_details: list[str] = Field(default_factory=list)
     historical_notes: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_payload(cls, data: Any) -> Any:
+        """Normalize model-specific JSON shapes before field validation."""
+        if isinstance(data, cls):
+            return data
+        return normalize_research_payload(data)

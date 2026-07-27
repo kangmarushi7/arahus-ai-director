@@ -1,6 +1,7 @@
-# RunPod Serverless SDXL-Turbo Worker
+# RunPod Serverless FLUX.1 [dev] Worker
 
-Text-to-image worker using Hugging Face Diffusers and `stabilityai/sdxl-turbo`.
+Text-to-image worker using Hugging Face Diffusers and
+`black-forest-labs/FLUX.1-dev`.
 
 ## Input
 
@@ -8,20 +9,24 @@ Text-to-image worker using Hugging Face Diffusers and `stabilityai/sdxl-turbo`.
 {
   "input": {
     "prompt": "A futuristic cyberpunk city",
-    "num_images": 2
+    "num_images": 1,
+    "width": 1024,
+    "height": 1024,
+    "num_inference_steps": 28,
+    "guidance_scale": 3.5
   }
 }
 ```
 
-`num_images` defaults to `2` when omitted.
+`num_images` defaults to `1` when omitted. Size / steps / guidance fall back to
+the FLUX.1-dev production defaults above when omitted.
 
 ## Output
 
 ```json
 {
   "images": [
-    "<base64-encoded PNG>",
-    "<base64-encoded PNG>"
+    "https://<r2-public-url>/..."
   ]
 }
 ```
@@ -29,9 +34,15 @@ Text-to-image worker using Hugging Face Diffusers and `stabilityai/sdxl-turbo`.
 ## Behavior
 
 - Loads the model once at startup and reuses it for every job.
-- Uses `torch.float16` on CUDA when a GPU is available.
+- Uses `torch.bfloat16` on CUDA when a GPU is available.
 - Falls back to CPU (`float32`) when no GPU is present.
-- Generates images sequentially with SDXL-Turbo defaults (`1` step, `guidance_scale=0.0`).
+- Generates images with FLUX.1-dev defaults (`28` steps, `guidance_scale=3.5`,
+  `1024×1024`).
+- Uploads each PNG to Cloudflare R2 and returns public URLs.
+- Accepts the Hugging Face license gate via `HF_TOKEN` /
+  `HUGGINGFACE_HUB_TOKEN` (required to download `FLUX.1-dev`).
+- Optional `FLUX_CPU_OFFLOAD=true` enables Diffusers model CPU offload on
+  smaller GPUs.
 
 ## Local setup
 
@@ -51,10 +62,41 @@ source .venv/bin/activate
 python -m pip install -r requirements.txt
 ```
 
-### AI Director Studio (UI shell)
+### AI Director Studio (full UI)
 
 ```bash
 streamlit run app/dashboard.py
+```
+
+### Arahus Lab (simple E2E test dashboard)
+
+Lightweight console for Railway / VPS — run the full pipeline and inspect
+domain, research, director, prompts, review, images, and metrics.
+
+```bash
+# local (uses requirements.txt or requirements.web.txt)
+streamlit run app/lab.py
+
+# or
+sh scripts/start_lab.sh
+```
+
+#### Deploy on Railway
+
+1. Create a new Railway project from this repo.
+2. Set the Dockerfile to `Dockerfile.web` (already in `railway.toml`).
+3. Add environment variables (at minimum `OPENROUTER_API_KEY`).
+   - For LLM-only dry runs without RunPod/R2: `ALLOW_STUB_SERVICES=true`
+   - For real images: `RUNPOD_API_KEY`, `RUNPOD_ENDPOINT_ID`, and all `R2_*`
+   - Optional: `DATABASE_URL` for persistence
+4. Railway sets `PORT` automatically; the container listens on it.
+5. Open the generated public URL — health check: `/_stcore/health`
+
+Local Docker:
+
+```bash
+docker build -f Dockerfile.web -t arahus-lab .
+docker run --rm -p 8501:8501 --env-file .ENV arahus-lab
 ```
 
 ### Benchmark suite
@@ -72,11 +114,13 @@ director / prompt / review / image timings, review score, image count).
 ## Build the container
 
 ```bash
-docker build -t runpod-sdxl-turbo-worker .
+docker build -t runpod-flux1-dev-worker .
 ```
 
 Push the image to a registry and attach it to a RunPod Serverless endpoint.
-On first start the worker downloads the model weights into `HF_HOME`.
+On first start the worker downloads the model weights into `HF_HOME`. Set
+`HF_TOKEN` in the endpoint secrets so the gated FLUX.1-dev weights can be
+fetched. Prefer a GPU with **≥24 GB VRAM** (A10 / A100 / H100 class).
 
 ## Project layout
 
@@ -140,11 +184,23 @@ LLM_MAX_TOKENS=4000                                # optional
 MAX_STORYBOARD_RETRIES=3                           # optional
 REVIEW_APPROVAL_THRESHOLD=85                       # optional
 AGENT_DEBUG=false                                  # optional
+ALLOW_STUB_SERVICES=false                          # optional; required for dry-runs without RunPod/R2
+PROMPT_OPTIMIZER_ENABLED=true                      # optional
+PIPELINE_MAX_COST_USD=0                            # optional; 0 = no cap
+IMAGE_MAX_WORKERS=4                                # optional
+LLM_CACHE_ENABLED=true                             # optional; caches domain detection
+PERSIST_PIPELINE_RUNS=true                         # optional
 
-# Image (RunPod)
+# Image (RunPod / FLUX.1-dev)
 RUNPOD_API_KEY=...
 RUNPOD_ENDPOINT_ID=...
 RUNPOD_BASE_URL=https://api.runpod.ai/v2           # optional
+IMAGE_MODEL_ID=black-forest-labs/FLUX.1-dev        # optional label + worker override
+IMAGE_WIDTH=1024                                   # optional
+IMAGE_HEIGHT=1024                                  # optional
+IMAGE_NUM_INFERENCE_STEPS=28                       # optional
+IMAGE_GUIDANCE_SCALE=3.5                           # optional
+HF_TOKEN=...                                       # required on the worker for gated FLUX weights
 
 # Storage (R2)
 R2_ACCESS_KEY_ID=...
@@ -156,8 +212,12 @@ R2_PUBLIC_URL=...
 # Database (PostgreSQL / Neon)
 DATABASE_URL=postgresql://USER:PASSWORD@HOST/DB?sslmode=require
 
-# Monitoring
+# Monitoring — see docs/observability.md
 METRICS_ENABLED=true                               # optional
 METRICS_INCLUDE_SAMPLES=false                      # optional
 METRICS_EXPORT_PATH=                               # optional
 ```
+
+LLM model precedence: explicit client model → non-empty `RESEARCH_MODEL` / `DIRECTOR_MODEL` / … → `src/llm/configs/router.yaml` task route. Copy `.env.example` for a full template.
+
+See also [docs/observability.md](docs/observability.md). Video model defaults in domain YAML are reserved for a future video pipeline.

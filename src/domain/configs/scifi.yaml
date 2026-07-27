@@ -1,0 +1,44 @@
+domain: scifi
+
+style: >
+  high-concept science fiction cinema, sleek industrial design, volumetric light,
+  cool metallic surfaces, controlled VFX aesthetic
+
+camera: >
+  wide anamorphic sci-fi framing, low-angle hero shots, tracking through corridors,
+  shallow depth of field, orbital reveals
+
+lighting: >
+  cool rim lights, practical neon accents, volumetric haze, high-contrast key with
+  soft fill, holographic glow sparingly
+
+color_palette: >
+  steel blue, cyan accents, graphite, cold whites, selective amber warning lights
+
+composition: >
+  graphic geometry, strong leading lines, scale contrast between human and machine,
+  deep perspective corridors
+
+quality_tags:
+  - highly detailed
+  - sharp focus
+  - cinematic still
+  - futuristic
+  - photorealistic
+
+negative_prompt: >
+  medieval costumes, fantasy magic, rustic villages, historical anachronisms,
+  cartoon, anime, low-poly, blurry, watermark, text
+
+image_model_defaults:
+  width: 1024
+  height: 1024
+  steps: 28
+  guidance_scale: 3.5
+  scheduler: default
+
+video_model_defaults:
+  fps: 24
+  duration_seconds: 4
+  motion_strength: 0.55
+  camera_motion: tracking_shot

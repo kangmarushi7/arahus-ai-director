@@ -7,6 +7,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 
 PIPELINE_STAGES: tuple[str, ...] = (
+    "Domain",
     "Research",
     "Director",
     "Prompt",

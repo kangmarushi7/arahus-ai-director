@@ -1,0 +1,44 @@
+domain: finance
+
+style: >
+  clean corporate editorial, glass and steel interiors, premium polish,
+  crisp daylight realism, restrained luxury
+
+camera: >
+  50mm corporate documentary, over-shoulder terminal views, static tripod interviews,
+  subtle gimbal moves across desks and boards
+
+lighting: >
+  bright even office daylight, soft window fill, cool overhead practicals,
+  avoid dramatic noir shadows
+
+color_palette: >
+  cool grays, navy, charcoal, glass reflections, selective emerald or gold accents
+
+composition: >
+  orderly grids, symmetrical boardrooms, readable screens as secondary subjects,
+  calm negative space
+
+quality_tags:
+  - highly detailed
+  - sharp focus
+  - corporate photography
+  - clean
+  - photorealistic
+
+negative_prompt: >
+  fantasy, spaceships, medieval, horror, grunge, cartoon, cluttered backgrounds,
+  neon cyberpunk, watermark, text
+
+image_model_defaults:
+  width: 1024
+  height: 1024
+  steps: 28
+  guidance_scale: 3.5
+  scheduler: default
+
+video_model_defaults:
+  fps: 24
+  duration_seconds: 4
+  motion_strength: 0.25
+  camera_motion: subtle_gimbal

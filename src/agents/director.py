@@ -1,10 +1,11 @@
-"""Director agent: turns research into a chronological, validated scene plan."""
+"""Director agent: turns research into a validated scene plan."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
 from src.agents.base import BaseAgent
+from src.domain.models import DomainInfo
 from src.models.research import ResearchResult
 from src.models.storyboard import DirectorPlan
 from src.services.llm import LLMClientError
@@ -16,18 +17,19 @@ SCENE_COUNT = 4
 MIN_WORDS_PER_SCENE = 60
 MAX_WORDS_PER_SCENE = 120
 
-DIRECTOR_PROMPT_TEMPLATE = """You are an award-winning historical film director \
-renowned for meticulously researched, visually striking period cinema.
+DIRECTOR_PROMPT_TEMPLATE = """You are an award-winning film director renowned for \
+meticulously researched, visually striking cinema across many content domains.
 
 Topic: {topic}
-
+{domain_block}
 Verified research (treat as authoritative context — do not invent beyond it):
 {research_block}
 
 Create exactly {scene_count} scenes that depict this topic.
 
 Rules:
-1. Present the scenes in strict chronological order from earliest to latest.
+1. Structure the scene sequence to fit the detected domain's storytelling needs \
+(use DomainInfo reasoning and keywords as guidance — do not ignore the domain).
 2. Generate exactly {scene_count} scenes — no more, no fewer.
 3. Do not hallucinate people, places, objects, or events that conflict with the \
 verified research. Prefer omission over invention.
@@ -39,9 +41,10 @@ the image.
 7. Do not write narration, dialogue, voice-over, on-screen titles, or backstory.
 8. Do not include camera instructions unless a specific shot choice is essential \
 to the meaning of the scene.
-9. In every scene, include period-accurate clothing, architecture, weapons, \
-lighting, and atmosphere grounded in the research.
+9. Ground clothing, architecture, props, lighting, and atmosphere in the research \
+and domain context.
 10. Each scene description must be between {min_words} and {max_words} words.
+11. Number scenes with contiguous ids 1..{scene_count} in presentation order.
 
 Return ONLY valid JSON.
 
@@ -109,12 +112,35 @@ def _format_research_block(research: ResearchResult) -> str:
     return "\n".join(lines)
 
 
-def generate_director_prompt(topic: str, research: ResearchResult) -> str:
-    """Build the director prompt for a historical topic.
+def _format_domain_block(domain_info: DomainInfo | None) -> str:
+    if domain_info is None:
+        return ""
+    keywords = ", ".join(domain_info.keywords) if domain_info.keywords else "(none)"
+    return (
+        "\nDetected DomainInfo (adjust scene planning to this domain; do not hardcode "
+        "a single genre):\n"
+        f"- domain: {domain_info.domain.value}\n"
+        f"- confidence: {domain_info.confidence:.3f}\n"
+        f"- reasoning: {domain_info.reasoning}\n"
+        f"- keywords: {keywords}\n"
+        f"- suggested_style: {domain_info.suggested_style or '(none)'}\n"
+        f"- suggested_camera: {domain_info.suggested_camera or '(none)'}\n"
+    )
+
+
+def generate_director_prompt(
+    topic: str,
+    research: ResearchResult,
+    domain_info: DomainInfo | None = None,
+    character_bible: str = "",
+) -> str:
+    """Build the director prompt for a topic.
 
     Args:
-        topic: Historical subject or event, e.g. "Fall of Constantinople 1453".
+        topic: Subject or event.
         research: Verified research used as authoritative scene context.
+        domain_info: Optional domain classification guiding scene structure.
+        character_bible: Optional character-consistency block appended when set.
 
     Returns:
         The prompt string to send to an LLM.
@@ -126,14 +152,21 @@ def generate_director_prompt(topic: str, research: ResearchResult) -> str:
         raise ValueError("topic must be a non-empty string")
     if not isinstance(research, ResearchResult):
         raise ValueError("research must be a ResearchResult instance")
+    if domain_info is not None and not isinstance(domain_info, DomainInfo):
+        raise ValueError("domain_info must be a DomainInfo instance when provided")
 
-    return DIRECTOR_PROMPT_TEMPLATE.format(
+    prompt = DIRECTOR_PROMPT_TEMPLATE.format(
         topic=" ".join(topic.split()),
+        domain_block=_format_domain_block(domain_info),
         research_block=_format_research_block(research),
         scene_count=SCENE_COUNT,
         min_words=MIN_WORDS_PER_SCENE,
         max_words=MAX_WORDS_PER_SCENE,
     )
+    bible = character_bible.strip()
+    if bible:
+        prompt = f"{prompt}\n\n{bible}\n"
+    return prompt
 
 
 def _validate_plan(plan: DirectorPlan, *, topic: str) -> DirectorPlan:
@@ -149,7 +182,7 @@ def _validate_plan(plan: DirectorPlan, *, topic: str) -> DirectorPlan:
     for index, scene in enumerate(plan.scenes, start=1):
         if scene.id != index:
             raise DirectorAgentError(
-                f"Scene ids must be chronological 1..{SCENE_COUNT}; "
+                f"Scene ids must be contiguous 1..{SCENE_COUNT}; "
                 f"expected id={index}, got id={scene.id}",
                 topic=topic,
             )
@@ -205,18 +238,26 @@ class DirectorAgent(BaseAgent[DirectorPlan]):
         )
         self._llm_client = llm_client
 
-    def run(self, topic: str, research: ResearchResult) -> DirectorPlan:
-        """Plan exactly four chronological scenes for ``topic``.
+    def run(
+        self,
+        topic: str,
+        research: ResearchResult,
+        domain_info: DomainInfo | None = None,
+        character_bible: str = "",
+    ) -> DirectorPlan:
+        """Plan exactly four scenes for ``topic``.
 
         Workflow:
-            1. Build a director prompt that embeds ``research`` as context.
+            1. Build a director prompt embedding ``research`` and optional domain.
             2. Call ``llm_client.generate_json(..., DirectorPlan)``.
             3. Validate the result (four scenes, titles, no duplicates).
             4. Return the :class:`DirectorPlan` model.
 
         Args:
-            topic: Historical subject or event.
+            topic: Subject or event.
             research: Verified research used as authoritative context.
+            domain_info: Optional domain classification for planning guidance.
+            character_bible: Optional character-consistency block for the prompt.
 
         Returns:
             The validated director plan.
@@ -229,17 +270,25 @@ class DirectorAgent(BaseAgent[DirectorPlan]):
             raise ValueError("topic must be a non-empty string")
         if not isinstance(research, ResearchResult):
             raise ValueError("research must be a ResearchResult instance")
+        if domain_info is not None and not isinstance(domain_info, DomainInfo):
+            raise ValueError("domain_info must be a DomainInfo instance when provided")
 
         cleaned_topic = " ".join(topic.split())
         self.logger.info(
             "event=director_start agent=DirectorAgent topic=%r "
-            "research_topic=%r",
+            "research_topic=%r domain=%s",
             cleaned_topic,
             research.topic,
+            domain_info.domain.value if domain_info else None,
         )
 
         self._log_progress(f"Building director prompt for {cleaned_topic!r}")
-        prompt = generate_director_prompt(cleaned_topic, research)
+        prompt = generate_director_prompt(
+            cleaned_topic,
+            research,
+            domain_info,
+            character_bible=character_bible,
+        )
         self._log_progress(f"Director prompt ready ({len(prompt)} chars)")
         if self.debug:
             self.logger.debug(
@@ -255,6 +304,7 @@ class DirectorAgent(BaseAgent[DirectorPlan]):
                 lambda: self._llm_client.generate_json(prompt, DirectorPlan),
                 topic=cleaned_topic,
                 research=research,
+                domain_info=domain_info,
             )
         except LLMClientError as exc:
             self.logger.error(

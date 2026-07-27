@@ -10,6 +10,9 @@ from typing import Any
 from src.database import session as _session
 from src.database.base import Base, utc_now
 from src.database.models import (
+    Character,
+    CharacterAlias,
+    CharacterReferenceImage,
     Image,
     ImageStatus,
     Project,
@@ -17,6 +20,7 @@ from src.database.models import (
     PromptVersion,
     PromptVersionStatus,
     Scene,
+    SceneCharacter,
     SceneStatus,
 )
 from src.database.session import (
@@ -33,6 +37,9 @@ from src.database.session import (
 
 __all__ = [
     "Base",
+    "Character",
+    "CharacterAlias",
+    "CharacterReferenceImage",
     "Image",
     "ImageStatus",
     "Project",
@@ -40,6 +47,7 @@ __all__ = [
     "PromptVersion",
     "PromptVersionStatus",
     "Scene",
+    "SceneCharacter",
     "SceneStatus",
     "SessionLocal",
     "configure_database",

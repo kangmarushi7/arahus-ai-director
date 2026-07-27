@@ -1,0 +1,12 @@
+# Web / Railway dashboard dependencies (no GPU / torch stack).
+pydantic
+pydantic-settings
+openai
+requests
+boto3
+sqlalchemy
+psycopg[binary]
+alembic
+python-dotenv
+streamlit
+PyYAML

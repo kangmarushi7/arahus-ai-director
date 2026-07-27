@@ -6,7 +6,10 @@ from typing import Any
 
 from pydantic import Field
 
+from src.domain.models import DomainInfo
+from src.domain.prompt_context import DomainPromptContext
 from src.models.base import StrictModel
+from src.models.context import PipelineContext
 from src.models.research import ResearchResult
 from src.models.review import ReviewResult
 from src.models.storyboard import DirectorPlan, Storyboard
@@ -32,3 +35,8 @@ class PipelineResult(StrictModel):
     review: ReviewResult
     images: list[GeneratedImageInfo] = Field(default_factory=list)
     metrics: dict[str, Any] = Field(default_factory=dict)
+    domain_info: DomainInfo | None = None
+    prompt_context: DomainPromptContext | None = None
+    context: PipelineContext | None = None
+    using_stub_services: bool = False
+    character_bible: str = ""

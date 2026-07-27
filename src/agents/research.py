@@ -1,32 +1,36 @@
-"""Research agent: turns a topic into validated historical reference material."""
+"""Research agent: turns a topic into validated reference material."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
 from src.agents.base import BaseAgent
+from src.domain.models import DomainInfo
 from src.models.research import ResearchResult
 from src.services.llm import LLMClientError
 
 if TYPE_CHECKING:
     from src.services.llm import LLMClient
 
-RESEARCH_PROMPT_TEMPLATE = """You are a meticulous historical researcher specializing \
-in primary sources, material culture, and period-accurate visual detail.
+RESEARCH_PROMPT_TEMPLATE = """You are a meticulous researcher specializing in \
+concrete, verifiable detail for visual content production.
 
 Topic: {topic}
-
-Research this topic and extract factual reference material for a historical film production.
+{domain_block}
+Research this topic and extract factual reference material for a film / image production.
 
 Rules:
 1. Return factual information only.
 2. Do not write storytelling, narrative, or dramatic interpretation.
-3. Do not include opinions, speculation, or modern commentary.
+3. Do not include opinions, speculation, or modern commentary unless the domain \
+requires contemporary terminology.
 4. Prefer concrete, verifiable details: names, places, dates, objects, and materials.
 5. If a detail is uncertain, omit it rather than inventing it.
-6. Return no markdown.
-7. Return no explanation.
-8. Return ONLY valid JSON.
+6. Adapt research depth and terminology to the detected domain when provided.
+7. Every array field MUST contain plain strings only (not objects).
+8. Return no markdown.
+9. Return no explanation.
+10. Return ONLY valid JSON.
 
 Use exactly this schema:
 
@@ -34,14 +38,14 @@ Use exactly this schema:
   "topic": "{topic}",
   "time_period": "...",
   "location": "...",
-  "key_people": [],
-  "key_locations": [],
-  "architecture": [],
-  "weapons": [],
-  "clothing": [],
-  "important_events": [],
-  "visual_details": [],
-  "historical_notes": []
+  "key_people": ["..."],
+  "key_locations": ["..."],
+  "architecture": ["..."],
+  "weapons": ["..."],
+  "clothing": ["..."],
+  "important_events": ["..."],
+  "visual_details": ["..."],
+  "historical_notes": ["..."]
 }}
 
 Return only JSON."""
@@ -55,11 +59,30 @@ class ResearchAgentError(Exception):
         self.topic = topic
 
 
-def generate_research_prompt(topic: str) -> str:
-    """Build the research prompt for a historical topic.
+def _format_domain_block(domain_info: DomainInfo | None) -> str:
+    if domain_info is None:
+        return ""
+    keywords = ", ".join(domain_info.keywords) if domain_info.keywords else "(none)"
+    return (
+        "\nDetected domain context (guide depth and terminology; do not change the "
+        "JSON schema):\n"
+        f"- domain: {domain_info.domain.value}\n"
+        f"- confidence: {domain_info.confidence:.3f}\n"
+        f"- reasoning: {domain_info.reasoning}\n"
+        f"- keywords: {keywords}\n"
+        f"- suggested_style: {domain_info.suggested_style or '(none)'}\n"
+    )
+
+
+def generate_research_prompt(
+    topic: str,
+    domain_info: DomainInfo | None = None,
+) -> str:
+    """Build the research prompt for a topic.
 
     Args:
-        topic: Historical subject or event, e.g. "Fall of Constantinople 1453".
+        topic: Subject or event to research.
+        domain_info: Optional domain classification guiding tone/terminology.
 
     Returns:
         The prompt string to send to an LLM.
@@ -70,11 +93,14 @@ def generate_research_prompt(topic: str) -> str:
     if not isinstance(topic, str) or not topic.strip():
         raise ValueError("topic must be a non-empty string")
 
-    return RESEARCH_PROMPT_TEMPLATE.format(topic=" ".join(topic.split()))
+    return RESEARCH_PROMPT_TEMPLATE.format(
+        topic=" ".join(topic.split()),
+        domain_block=_format_domain_block(domain_info),
+    )
 
 
 class ResearchAgent(BaseAgent[ResearchResult]):
-    """Produces a validated :class:`ResearchResult` for a historical topic.
+    """Produces a validated :class:`ResearchResult` for a topic.
 
     Depends only on an injected :class:`~src.services.llm.LLMClient`. Provider
     details (API keys, base URLs, model names) stay outside this class.
@@ -103,17 +129,22 @@ class ResearchAgent(BaseAgent[ResearchResult]):
         )
         self._llm_client = llm_client
 
-    def run(self, topic: str) -> ResearchResult:
+    def run(
+        self,
+        topic: str,
+        domain_info: DomainInfo | None = None,
+    ) -> ResearchResult:
         """Research ``topic`` and return a validated :class:`ResearchResult`.
 
         Workflow:
-            1. Build the research prompt.
+            1. Build the research prompt (optionally domain-aware).
             2. Call ``llm_client.generate_json(...)``.
             3. Receive a Pydantic-validated ``ResearchResult``.
-            4. Return that model (no dictionaries, no prompt parsing).
+            4. Return that model (schema unchanged).
 
         Args:
-            topic: Historical subject or event.
+            topic: Subject or event.
+            domain_info: Optional domain classification for research guidance.
 
         Returns:
             The validated research result.
@@ -124,15 +155,18 @@ class ResearchAgent(BaseAgent[ResearchResult]):
         """
         if not isinstance(topic, str) or not topic.strip():
             raise ValueError("topic must be a non-empty string")
+        if domain_info is not None and not isinstance(domain_info, DomainInfo):
+            raise ValueError("domain_info must be a DomainInfo instance when provided")
 
         cleaned_topic = " ".join(topic.split())
         self._log_progress(f"Building research prompt for {cleaned_topic!r}")
         self.logger.info(
-            "event=research_start agent=ResearchAgent topic=%r",
+            "event=research_start agent=ResearchAgent topic=%r domain=%s",
             cleaned_topic,
+            domain_info.domain.value if domain_info else None,
         )
 
-        prompt = generate_research_prompt(cleaned_topic)
+        prompt = generate_research_prompt(cleaned_topic, domain_info)
         self._log_progress(f"Research prompt ready ({len(prompt)} chars)")
         if self.debug:
             self.logger.debug(
@@ -147,8 +181,11 @@ class ResearchAgent(BaseAgent[ResearchResult]):
             result = self._execute(
                 lambda: self._llm_client.generate_json(prompt, ResearchResult),
                 topic=cleaned_topic,
+                domain_info=domain_info,
             )
         except LLMClientError as exc:
+            # Surface missing-topic / empty-payload as a clear agent error;
+            # shape mismatches are handled by ResearchResult normalization.
             self.logger.error(
                 "event=research_failed agent=ResearchAgent topic=%r error=%s",
                 cleaned_topic,

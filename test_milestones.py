@@ -68,7 +68,7 @@ def milestone_director(research: ResearchResult) -> DirectorPlan:
 
 
 def milestone_prompt(plan: DirectorPlan, research: ResearchResult) -> Storyboard:
-    """Milestone 4 – PromptAgent returns SDXL-ready image prompts."""
+    """Milestone 4 – PromptAgent returns FLUX-ready image prompts."""
     _print_heading("Milestone 4 – Prompt Agent")
     settings = get_settings()
     agent = PromptAgent(create_llm(settings.llm.prompt_model), max_retries=2)

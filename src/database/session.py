@@ -240,6 +240,11 @@ def get_db() -> Iterator[Session]:
 
 
 def create_database(*, database_url: Optional[str] = None) -> str:
+    """Create ORM tables when missing.
+
+    Prefer Alembic migrations in production (`python -m scripts.db upgrade`).
+    This helper remains a documented bootstrap fallback for local/playground use.
+    """
     """Create all tables registered on :class:`~src.database.base.Base`.
 
     Prefer Alembic migrations in production. This helper is for bootstrap/tests.

@@ -26,6 +26,7 @@ from src.database.models._helpers import enum_values
 if TYPE_CHECKING:
     from src.database.models.project import Project
     from src.database.models.prompt_version import PromptVersion
+    from src.database.models.scene_character import SceneCharacter
 
 
 class SceneStatus(str, enum.Enum):
@@ -97,6 +98,12 @@ class Scene(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
         order_by="PromptVersion.version",
+    )
+    scene_characters: Mapped[list[SceneCharacter]] = relationship(
+        back_populates="scene",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="SceneCharacter.sort_order",
     )
 
     def __repr__(self) -> str:

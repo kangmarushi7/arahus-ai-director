@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from typing import Any, Mapping
 
-from src.database.models import ImageStatus, ProjectStatus
+from src.characters import names_mentioned_in_text
+from src.database.models import ImageStatus, ProjectStatus, SceneCharacter
 from src.database.session import create_database, get_session
 from src.models.pipeline import PipelineResult
+from src.monitoring.metrics import STAGE_DATABASE
+from src.monitoring.profiler import measure_stage
+from src.repositories.character_repository import CharacterRepository
 from src.repositories.image_repository import ImageRepository
 from src.repositories.project_repository import ProjectRepository
 from src.repositories.prompt_version_repository import PromptVersionRepository
@@ -27,7 +32,7 @@ def sync_storyboard_project(
     scenes: list[Mapping[str, Any]],
     *,
     project_id: uuid.UUID | str | None = None,
-    image_model: str = "stabilityai/sdxl-turbo",
+    image_model: str = "black-forest-labs/FLUX.1-dev",
 ) -> tuple[uuid.UUID, dict[int, uuid.UUID]]:
     """Upsert a project + scenes for playground editing.
 
@@ -130,7 +135,8 @@ def sync_pipeline_result(
     result: PipelineResult,
     *,
     project_id: uuid.UUID | str | None = None,
-    image_model: str = "stabilityai/sdxl-turbo",
+    image_model: str = "black-forest-labs/FLUX.1-dev",
+    metrics: dict[str, Any] | None = None,
 ) -> tuple[uuid.UUID, dict[int, uuid.UUID]]:
     """Persist a completed pipeline storyboard for per-scene playground edits."""
     url_by_scene = {
@@ -144,12 +150,124 @@ def sync_pipeline_result(
         if scene.id in url_by_scene and not (payload.get("image") or {}).get("url"):
             payload["url"] = url_by_scene[scene.id]
         scenes.append(payload)
-    return sync_storyboard_project(
-        result.topic,
-        scenes,
-        project_id=project_id,
-        image_model=image_model,
-    )
+
+    with measure_stage(STAGE_DATABASE):
+        synced_id, mapping = sync_storyboard_project(
+            result.topic,
+            scenes,
+            project_id=project_id,
+            image_model=image_model,
+        )
+        _write_project_metrics(synced_id, metrics)
+        _link_scene_characters(result, mapping)
+        return synced_id, mapping
+
+
+def _write_project_metrics(
+    project_id: uuid.UUID,
+    metrics: dict[str, Any] | None,
+) -> None:
+    """Best-effort write of metrics JSON onto the project row."""
+    if not metrics:
+        return
+    try:
+        with get_session() as session:
+            projects = ProjectRepository(session)
+            project = projects.get(project_id)
+            if project is None:
+                return
+            if not hasattr(project, "metrics_json"):
+                return
+            projects.update(
+                project,
+                metrics_json=json.dumps(metrics, ensure_ascii=False, default=str),
+            )
+    except Exception as exc:  # noqa: BLE001 - optional persistence
+        logger.warning("event=project_metrics_persist_skipped error=%s", exc)
+
+
+def _link_scene_characters(
+    result: PipelineResult,
+    mapping: dict[int, uuid.UUID],
+) -> None:
+    """Best-effort link characters mentioned in scene text to synced scenes."""
+    candidate_names = _candidate_character_names(result)
+    if not candidate_names or not mapping:
+        return
+    try:
+        with get_session() as session:
+            characters = CharacterRepository(session)
+            for scene in result.storyboard.scenes:
+                db_scene_id = mapping.get(int(scene.id))
+                if db_scene_id is None:
+                    continue
+                text = " ".join(
+                    part
+                    for part in (
+                        scene.title,
+                        scene.description,
+                        scene.image_prompt or "",
+                    )
+                    if part
+                )
+                mentioned = names_mentioned_in_text(text, candidate_names)
+                for sort_order, name in enumerate(mentioned):
+                    try:
+                        character = characters.find_by_name(name) or characters.find_by_alias(
+                            name
+                        )
+                        if character is None:
+                            continue
+                        with session.begin_nested():
+                            session.add(
+                                SceneCharacter(
+                                    scene_id=db_scene_id,
+                                    character_id=character.id,
+                                    sort_order=sort_order,
+                                )
+                            )
+                            session.flush()
+                    except Exception as exc:  # noqa: BLE001 - skip duplicates / races
+                        logger.debug(
+                            "event=scene_character_link_skipped scene_id=%s "
+                            "name=%r error=%s",
+                            db_scene_id,
+                            name,
+                            exc,
+                        )
+    except Exception as exc:  # noqa: BLE001 - optional persistence
+        logger.warning("event=scene_character_link_failed error=%s", exc)
+
+
+def _candidate_character_names(result: PipelineResult) -> list[str]:
+    """Collect unique character names from research and character bible."""
+    names: list[str] = []
+    seen: set[str] = set()
+
+    def _add(raw: str) -> None:
+        cleaned = " ".join(str(raw).split())
+        if not cleaned:
+            return
+        key = cleaned.casefold()
+        if key in seen:
+            return
+        seen.add(key)
+        names.append(cleaned)
+
+    for person in result.research.key_people:
+        _add(person)
+
+    bible = (result.character_bible or "").strip()
+    if bible:
+        for line in bible.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("- "):
+                continue
+            body = stripped[2:]
+            name_part = body.split(":", 1)[0].strip()
+            _add(name_part)
+
+    return names
 
 
 def _parse_uuid(value: uuid.UUID | str) -> uuid.UUID:

@@ -16,13 +16,15 @@ import requests
 
 from src.config import ImageConfig, get_settings
 from src.models.image import ImageResult
+from src.monitoring.metrics import STAGE_RUNPOD_POLL, STAGE_RUNPOD_SUBMIT
+from src.monitoring.profiler import measure_stage
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "https://api.runpod.ai/v2"
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 30.0
 DEFAULT_POLL_INTERVAL_SECONDS = 2.0
-DEFAULT_POLL_TIMEOUT_SECONDS = 300.0
+DEFAULT_POLL_TIMEOUT_SECONDS = 600.0
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_RETRY_BACKOFF_SECONDS = 1.0
 
@@ -104,6 +106,10 @@ class RunPodClient:
         endpoint_id: str,
         base_url: str = DEFAULT_BASE_URL,
         *,
+        width: int = 1024,
+        height: int = 1024,
+        num_inference_steps: int = 28,
+        guidance_scale: float = 3.5,
         request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
         poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
         poll_timeout_seconds: float = DEFAULT_POLL_TIMEOUT_SECONDS,
@@ -117,6 +123,10 @@ class RunPodClient:
             api_key: RunPod API key (Bearer token).
             endpoint_id: Serverless endpoint identifier.
             base_url: RunPod API root, e.g. ``https://api.runpod.ai/v2``.
+            width: Default generation width forwarded to the FLUX worker.
+            height: Default generation height forwarded to the FLUX worker.
+            num_inference_steps: Denoising steps forwarded to the FLUX worker.
+            guidance_scale: CFG scale forwarded to the FLUX worker.
             request_timeout_seconds: Per-request socket timeout for submit/status.
             poll_interval_seconds: Delay between status polls.
             poll_timeout_seconds: Maximum wall time spent waiting for a job.
@@ -135,6 +145,12 @@ class RunPodClient:
             raise ValueError("endpoint_id must be a non-empty string")
         if not base_url.strip():
             raise ValueError("base_url must be a non-empty string")
+        if width < 1 or height < 1:
+            raise ValueError("width and height must be positive")
+        if num_inference_steps < 1:
+            raise ValueError("num_inference_steps must be positive")
+        if guidance_scale < 0:
+            raise ValueError("guidance_scale cannot be negative")
         if request_timeout_seconds <= 0:
             raise ValueError("request_timeout_seconds must be positive")
         if poll_interval_seconds <= 0:
@@ -147,6 +163,10 @@ class RunPodClient:
         self.api_key = api_key.strip()
         self.endpoint_id = endpoint_id.strip()
         self.base_url = base_url.strip().rstrip("/")
+        self.width = int(width)
+        self.height = int(height)
+        self.num_inference_steps = int(num_inference_steps)
+        self.guidance_scale = float(guidance_scale)
         self.request_timeout_seconds = float(request_timeout_seconds)
         self.poll_interval_seconds = float(poll_interval_seconds)
         self.poll_timeout_seconds = float(poll_timeout_seconds)
@@ -191,6 +211,10 @@ class RunPodClient:
             api_key=api_key,
             endpoint_id=endpoint_id,
             base_url=image.base_url or DEFAULT_BASE_URL,
+            width=image.width,
+            height=image.height,
+            num_inference_steps=image.num_inference_steps,
+            guidance_scale=image.guidance_scale,
             request_timeout_seconds=request_timeout_seconds,
             poll_interval_seconds=poll_interval_seconds,
             poll_timeout_seconds=poll_timeout_seconds,
@@ -240,13 +264,28 @@ class RunPodClient:
             RunPodClientError: If the response does not include a job id.
         """
         cleaned = self._require_prompt(prompt)
-        payload = {"input": {"prompt": cleaned, "num_images": 1}}
+        payload = {
+            "input": {
+                "prompt": cleaned,
+                "num_images": 1,
+                "width": self.width,
+                "height": self.height,
+                "num_inference_steps": self.num_inference_steps,
+                "guidance_scale": self.guidance_scale,
+            }
+        }
         logger.info(
-            "event=runpod_submit endpoint_id=%s prompt_chars=%s",
+            "event=runpod_submit endpoint_id=%s prompt_chars=%s "
+            "size=%sx%s steps=%s guidance=%s",
             self.endpoint_id,
             len(cleaned),
+            self.width,
+            self.height,
+            self.num_inference_steps,
+            self.guidance_scale,
         )
-        response = self._request_json("POST", self._run_url, json_body=payload)
+        with measure_stage(STAGE_RUNPOD_SUBMIT):
+            response = self._request_json("POST", self._run_url, json_body=payload)
         job_id = response.get("id")
         if not isinstance(job_id, str) or not job_id.strip():
             raise RunPodClientError(
@@ -288,40 +327,42 @@ class RunPodClient:
             self.poll_timeout_seconds,
         )
 
-        while True:
-            payload = self._request_json("GET", url)
-            status = str(payload.get("status") or "").upper()
-            logger.debug(
-                "event=runpod_poll_tick job_id=%s status=%s",
-                cleaned_id,
-                status,
-            )
-
-            if status in _TERMINAL_STATUSES:
-                if status in _FAILURE_STATUSES:
-                    error_detail = payload.get("error") or payload.get("output")
-                    raise RunPodJobError(
-                        f"RunPod job {cleaned_id!r} ended with status "
-                        f"{status}: {error_detail!r}",
-                        job_id=cleaned_id,
-                        status=status,
-                        payload=payload,
-                    )
-                logger.info(
-                    "event=runpod_poll_complete job_id=%s status=%s",
+        with measure_stage(STAGE_RUNPOD_POLL):
+            while True:
+                payload = self._request_json("GET", url)
+                status = str(payload.get("status") or "").upper()
+                logger.debug(
+                    "event=runpod_poll_tick job_id=%s status=%s",
                     cleaned_id,
                     status,
                 )
-                return payload
 
-            if time.monotonic() >= deadline:
-                raise RunPodTimeoutError(
-                    f"Timed out after {self.poll_timeout_seconds:.0f}s waiting "
-                    f"for RunPod job {cleaned_id!r} (last status={status or 'unknown'})",
-                    job_id=cleaned_id,
-                )
+                if status in _TERMINAL_STATUSES:
+                    if status in _FAILURE_STATUSES:
+                        error_detail = payload.get("error") or payload.get("output")
+                        raise RunPodJobError(
+                            f"RunPod job {cleaned_id!r} ended with status "
+                            f"{status}: {error_detail!r}",
+                            job_id=cleaned_id,
+                            status=status,
+                            payload=payload,
+                        )
+                    logger.info(
+                        "event=runpod_poll_complete job_id=%s status=%s",
+                        cleaned_id,
+                        status,
+                    )
+                    return payload
 
-            time.sleep(self.poll_interval_seconds)
+                if time.monotonic() >= deadline:
+                    raise RunPodTimeoutError(
+                        f"Timed out after {self.poll_timeout_seconds:.0f}s waiting "
+                        f"for RunPod job {cleaned_id!r} "
+                        f"(last status={status or 'unknown'})",
+                        job_id=cleaned_id,
+                    )
+
+                time.sleep(self.poll_interval_seconds)
 
     def generate(self, prompt: str) -> ImageResult:
         """Submit a prompt, wait for completion, and return an :class:`ImageResult`.

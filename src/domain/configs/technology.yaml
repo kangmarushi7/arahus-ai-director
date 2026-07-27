@@ -1,0 +1,43 @@
+domain: technology
+
+style: >
+  modern tech keynote aesthetic, clean minimalism, precise materials,
+  cool-neutral palette, product-forward realism
+
+camera: >
+  macro and mid product shots, controlled dolly, top-down desks,
+  sharp focus on devices and interfaces
+
+lighting: >
+  soft studio lighting, controlled reflections on glass and metal,
+  cool key with neutral fill
+
+color_palette: >
+  cool neutrals, silver, graphite, soft white, selective electric blue accents
+
+composition: >
+  minimal product-centered frames, geometric alignment, generous clean negative space
+
+quality_tags:
+  - highly detailed
+  - sharp focus
+  - product photography
+  - clean
+  - photorealistic
+
+negative_prompt: >
+  fantasy castles, medieval armor, messy cable overload, dated CRT look,
+  cartoon, watermark, text, clutter
+
+image_model_defaults:
+  width: 1024
+  height: 1024
+  steps: 28
+  guidance_scale: 3.5
+  scheduler: default
+
+video_model_defaults:
+  fps: 24
+  duration_seconds: 4
+  motion_strength: 0.3
+  camera_motion: controlled_dolly

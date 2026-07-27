@@ -1,0 +1,63 @@
+providers:
+  openrouter:
+    type: openrouter
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    timeout_seconds: 120
+    default_headers:
+      HTTP-Referer: https://arahus.ai
+      X-Title: Arahus AI Director
+
+default_provider: openrouter
+
+retry:
+  max_attempts: 3
+  base_delay_seconds: 0.75
+  max_delay_seconds: 8.0
+  jitter_ratio: 0.25
+
+tasks:
+  research:
+    provider: openrouter
+    model: openai/gpt-oss-20b:free
+    temperature: 0.2
+    max_tokens: 4000
+  director:
+    provider: openrouter
+    model: nvidia/llama-3.1-nemotron-ultra-253b-v1:free
+    temperature: 0.2
+    max_tokens: 4000
+  prompt:
+    provider: openrouter
+    model: openai/gpt-oss-20b:free
+    temperature: 0.2
+    max_tokens: 4000
+  review:
+    provider: openrouter
+    model: openai/gpt-oss-20b:free
+    temperature: 0.2
+    max_tokens: 4000
+  domain:
+    provider: openrouter
+    model: openai/gpt-oss-20b:free
+    temperature: 0.1
+    max_tokens: 1500
+  general:
+    provider: openrouter
+    model: openai/gpt-oss-20b:free
+    temperature: 0.2
+    max_tokens: 4000
+
+pricing:
+  default:
+    input_per_million: 0.50
+    output_per_million: 1.50
+  openai/gpt-oss-20b:free:
+    input_per_million: 0.0
+    output_per_million: 0.0
+  nvidia/llama-3.1-nemotron-ultra-253b-v1:free:
+    input_per_million: 0.0
+    output_per_million: 0.0
+  nvidia/nemotron-3-ultra-550b-a55b:free:
+    input_per_million: 0.0
+    output_per_million: 0.0

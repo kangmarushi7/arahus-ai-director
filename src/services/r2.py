@@ -10,6 +10,8 @@ from typing import Any
 import boto3
 
 from src.config import StorageConfig, get_settings
+from src.monitoring.metrics import STAGE_CLOUDFLARE_UPLOAD
+from src.monitoring.profiler import measure_stage
 
 
 @lru_cache(maxsize=1)
@@ -48,6 +50,11 @@ class R2StorageClient:
         Returns:
             The public URL of the uploaded object.
         """
+        with measure_stage(STAGE_CLOUDFLARE_UPLOAD):
+            return self._upload(data, content_type=content_type)
+
+    def _upload(self, data: bytes, *, content_type: str = "image/png") -> str:
+        """Perform the R2 upload without profiler instrumentation."""
         extension = "png" if content_type == "image/png" else "bin"
         filename = f"{uuid.uuid4()}.{extension}"
         cfg = self._settings

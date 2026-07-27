@@ -1,0 +1,43 @@
+domain: fantasy
+
+style: >
+  epic fantasy cinema, rich saturated colors, ornate costumes and architecture,
+  mythic atmosphere with dramatic god-rays
+
+camera: >
+  wide epic establishing shots, crane reveals, low-angle heroes, slow orbital moves,
+  monumental scale framing
+
+lighting: >
+  dramatic volumetric god-rays, warm magical practicals, deep shadows with luminous
+  accents, twilight and storm moods when fitting
+
+color_palette: >
+  deep jewel tones, emerald, crimson, gold leaf accents, misty blues, warm firelight
+
+composition: >
+  epic scale contrast, layered depth, heroic silhouettes, environmental grandeur
+
+quality_tags:
+  - highly detailed
+  - sharp focus
+  - epic
+  - cinematic still
+  - photorealistic
+
+negative_prompt: >
+  modern city, smartphones, sci-fi HUD, corporate office, photorealistic modern guns,
+  cartoonish proportions, watermark, text
+
+image_model_defaults:
+  width: 1024
+  height: 1024
+  steps: 28
+  guidance_scale: 3.5
+  scheduler: default
+
+video_model_defaults:
+  fps: 24
+  duration_seconds: 4
+  motion_strength: 0.5
+  camera_motion: crane_reveal

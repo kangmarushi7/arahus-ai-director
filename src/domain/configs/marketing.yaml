@@ -1,0 +1,44 @@
+domain: marketing
+
+style: >
+  polished commercial advertising, lifestyle photography look, aspirational tone,
+  vibrant controlled color grade
+
+camera: >
+  85mm product beauty, hero angles, smooth slider moves, shallow depth of field,
+  clean background separation
+
+lighting: >
+  soft beauty lighting, controlled specular highlights on products, warm key with
+  gentle fill, premium studio look
+
+color_palette: >
+  brand-ready saturated accents, clean whites, warm skin tones, high-end contrast
+
+composition: >
+  hero product or lifestyle subject dominance, generous negative space for copy,
+  symmetrical or dynamic diagonal energy
+
+quality_tags:
+  - highly detailed
+  - sharp focus
+  - commercial
+  - premium
+  - photorealistic
+
+negative_prompt: >
+  dirty, dystopian, horror, low quality, watermark, text overlays, distorted hands,
+  cluttered frame, cartoon, anime
+
+image_model_defaults:
+  width: 1024
+  height: 1024
+  steps: 28
+  guidance_scale: 3.5
+  scheduler: default
+
+video_model_defaults:
+  fps: 24
+  duration_seconds: 4
+  motion_strength: 0.4
+  camera_motion: slider

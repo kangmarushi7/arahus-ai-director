@@ -1,0 +1,21 @@
+# Keep Railway / web image small (no GPU worker artifacts).
+.git
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+.cache
+artifacts
+database/*.db
+*.md
+!README.md
+.env
+.ENV
+.env.*
+!.env.example
+Dockerfile
+handler.py
+requirements.txt
+tests
+reports

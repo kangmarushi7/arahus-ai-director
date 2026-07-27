@@ -92,7 +92,7 @@ class ProjectRepository:
         Returns:
             The updated :class:`Project` instance.
         """
-        allowed = {"topic", "status", "notes"}
+        allowed = {"topic", "status", "notes", "metrics_json"}
         for key, value in fields.items():
             if key in allowed:
                 setattr(project, key, value)

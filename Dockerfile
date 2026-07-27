@@ -1,11 +1,12 @@
-# Minimal Python 3.11 base for a portable Diffusers worker.
+# Minimal Python 3.11 base for a portable Diffusers FLUX.1-dev worker.
 FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
-    HF_HOME=/app/.cache/huggingface
+    HF_HOME=/app/.cache/huggingface \
+    IMAGE_MODEL_ID=black-forest-labs/FLUX.1-dev
 
 WORKDIR /app
 

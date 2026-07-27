@@ -2,17 +2,37 @@
 
 from __future__ import annotations
 
-import base64
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Protocol, runtime_checkable
 
-from src.config import get_settings
 from src.agents.director import DirectorAgent
 from src.agents.prompt import PromptAgent
 from src.agents.research import ResearchAgent
 from src.agents.review import ReviewAgent
+from src.characters import (
+    format_character_bible,
+    persist_character_profiles,
+    profiles_from_research,
+)
+from src.config import get_settings
+from src.domain import (
+    ConfigLoader,
+    DomainRegistry,
+    DomainService,
+    LLMDomainDetector,
+)
+from src.domain.service import DomainServiceError
+from src.events import (
+    DirectorCompleted,
+    Event,
+    EventBus,
+    ImageGenerated,
+    PromptCompleted,
+    ResearchCompleted,
+    ReviewCompleted,
+)
+from src.models.context import PipelineContext
 from src.models.image import ImageResult
 from src.models.pipeline import GeneratedImageInfo, PipelineResult
 from src.models.research import ResearchResult
@@ -21,18 +41,30 @@ from src.models.storyboard import DirectorPlan, Scene, Storyboard
 from src.monitoring.metrics import (
     CLOUDFLARE_UPLOAD_LATENCY,
     DIRECTOR_LATENCY,
-    PIPELINE_DURATION,
     PROMPT_LATENCY,
     RESEARCH_LATENCY,
     REVIEW_LATENCY,
     RUNPOD_LATENCY,
+    STAGE_DIRECTOR,
+    STAGE_DOMAIN_DETECTION,
+    STAGE_PROMPT,
+    STAGE_RESEARCH,
+    STAGE_REVIEW,
     TOTAL_LATENCY,
     MetricsCollector,
 )
+from src.monitoring.pipeline_metrics import PipelineReport
+from src.monitoring.pipeline_profiler import PipelineProfiler
+from src.monitoring.report import report_to_dashboard_metrics
 from src.progress import ProgressCallback, ProgressReporter
+from src.prompt import PromptComposer
+from src.prompt.optimizer import PromptOptimizer
 from src.services.llm import LLMClient
-from src.services.llm_factory import create_llm
-
+from src.services.llm_factory import create_task_llm
+from src.services.parallel_images import (
+    ParallelImageOrchestrator,
+    resolve_image_backend,
+)
 
 class PipelineValidationError(Exception):
     """Raised when a storyboard fails every review attempt."""
@@ -70,11 +102,12 @@ class StorageClient(Protocol):
 
 
 class DirectorPipeline:
-    """Runs the research, director, prompt, review, and image stages in order.
+    """Runs domain detection, research, director, prompt, review, and images.
 
     By default each LLM-backed agent receives its own client from
-    :func:`create_llm`, using the model names in :mod:`src.config`. Optional
-    client overrides keep the pipeline testable with fakes.
+    :func:`create_task_llm`, using router/env task routes. Optional client
+    overrides keep the pipeline testable with fakes. Public :meth:`generate`
+    signature is unchanged.
     """
 
     def __init__(
@@ -87,6 +120,12 @@ class DirectorPipeline:
         review_llm: LLMClient | None = None,
         max_storyboard_retries: int | None = None,
         metrics: MetricsCollector | None = None,
+        domain_service: DomainService | None = None,
+        prompt_composer: PromptComposer | None = None,
+        domain_llm: LLMClient | None = None,
+        max_parallel_images: int | None = None,
+        event_bus: EventBus | None = None,
+        using_stub_services: bool = False,
     ) -> None:
         """Wire the pipeline's dependencies.
 
@@ -100,6 +139,14 @@ class DirectorPipeline:
             max_storyboard_retries: Maximum prompt regeneration attempts after
                 the initial storyboard is rejected. Defaults to pipeline config.
             metrics: Optional metrics collector; a fresh one is created when omitted.
+            domain_service: Optional domain intelligence facade.
+            prompt_composer: Optional deterministic prompt composer.
+            domain_llm: Optional LLM used only for domain detection when
+                ``domain_service`` is not injected.
+            max_parallel_images: Max concurrent image jobs (default from
+                ``MAX_PARALLEL_IMAGES`` / ``IMAGE_MAX_WORKERS``, usually 4).
+            event_bus: Optional in-process event bus for stage notifications.
+            using_stub_services: When ``True``, image statuses reflect stub mode.
         """
         settings = get_settings()
         retries = (
@@ -110,16 +157,36 @@ class DirectorPipeline:
         if retries < 0:
             raise ValueError("max_storyboard_retries cannot be negative")
 
+        parallel = (
+            settings.pipeline.image_max_workers
+            if max_parallel_images is None
+            else int(max_parallel_images)
+        )
+        if parallel < 1:
+            raise ValueError("max_parallel_images must be >= 1")
+
         self.logger = logging.getLogger(self.__class__.__name__)
         self._image_generator = image_generator
         self._storage_client = storage_client
         self._max_storyboard_retries = retries
+        self._max_parallel_images = parallel
         self._metrics = metrics or MetricsCollector()
+        self._event_bus = event_bus
+        self._using_stub_services = using_stub_services
 
-        self._research_llm = research_llm or create_llm(settings.llm.research_model)
-        self._director_llm = director_llm or create_llm(settings.llm.director_model)
-        self._prompt_llm = prompt_llm or create_llm(settings.llm.prompt_model)
-        self._review_llm = review_llm or create_llm(settings.llm.review_model)
+        self._research_llm = research_llm or create_task_llm("research")
+        self._director_llm = director_llm or create_task_llm("director")
+        self._prompt_llm = prompt_llm or create_task_llm("prompt")
+        self._review_llm = review_llm or create_task_llm("review")
+        self._domain_llm = domain_llm or create_task_llm("domain")
+
+        self._prompt_composer = prompt_composer or PromptComposer()
+        self._config_loader = ConfigLoader()
+        self._domain_service = domain_service or DomainService(
+            detector=LLMDomainDetector(self._domain_llm),
+            registry=DomainRegistry(),
+            config_loader=self._config_loader,
+        )
 
         self._research_agent = ResearchAgent(
             self._research_llm,
@@ -131,6 +198,8 @@ class DirectorPipeline:
         )
         self._prompt_agent = PromptAgent(
             self._prompt_llm,
+            prompt_composer=self._prompt_composer,
+            config_loader=self._config_loader,
             debug=settings.pipeline.agent_debug,
         )
         self._review_agent = ReviewAgent(
@@ -146,11 +215,11 @@ class DirectorPipeline:
     ) -> PipelineResult:
         """Build a full pipeline result for ``topic``.
 
-        Captures research, director plan, approved storyboard, review, image
-        statuses, and metrics for the studio UI.
+        Captures domain detection, research, director plan, approved storyboard,
+        review, image statuses, and metrics for the studio UI.
 
         Args:
-            topic: Historical subject or event.
+            topic: Subject or event to visualize.
             progress_callback: Optional callable invoked with human-readable
                 progress lines for live consoles.
 
@@ -166,94 +235,234 @@ class DirectorPipeline:
             raise ValueError("topic must be a non-empty string")
 
         cleaned_topic = " ".join(topic.split())
+        settings = get_settings()
+        monitoring_enabled = settings.monitoring.enabled
         self._reporter = ProgressReporter(callback=progress_callback)
         self._bind_step_loggers()
         self._emit(f"Pipeline started for topic: {cleaned_topic}", progress=0.01)
         self._metrics.reset()
+        profiler = PipelineProfiler(
+            self._metrics,
+            topic=cleaned_topic,
+            log=self.logger,
+            print_table=monitoring_enabled,
+            print_cost_report=monitoring_enabled,
+        )
+        profiler.start()
         started = time.perf_counter()
         stage_timings: dict[str, float] = {
+            "domain_seconds": 0.0,
             "research_seconds": 0.0,
             "director_seconds": 0.0,
             "prompt_seconds": 0.0,
             "review_seconds": 0.0,
             "image_seconds": 0.0,
         }
+        pipeline_context: PipelineContext | None = None
+        character_bible = ""
+        run_error: str | None = None
+        research: ResearchResult | None = None
+        plan: DirectorPlan | None = None
+        review: ReviewResult | None = None
+        final_storyboard: Storyboard | None = None
+        images: list[GeneratedImageInfo] = []
 
         try:
-            self._begin_stage("Research")
-            self._emit(
-                "Stage 1/5 — Research Agent: gathering historical facts…",
-                progress=0.05,
-            )
-            stage_started = time.perf_counter()
-            with self._metrics.measure(RESEARCH_LATENCY):
-                research = self._research_agent.run(cleaned_topic)
-            stage_timings["research_seconds"] = time.perf_counter() - stage_started
-            self._complete_stage("Research")
-            self._emit(
-                "Research complete "
-                f"({stage_timings['research_seconds']:.1f}s) — "
-                f"location={research.location or 'n/a'}, "
-                f"people={len(research.key_people)}, "
-                f"events={len(getattr(research, 'important_events', []) or [])}",
-                progress=0.22,
-            )
+            with profiler.bind():
+                self._begin_stage("Domain")
+                self._emit("Stage 1/6 — Domain…", progress=0.02)
+                stage_started = time.perf_counter()
+                try:
+                    with profiler.measure(STAGE_DOMAIN_DETECTION):
+                        domain_info = self._domain_service.detect(cleaned_topic)
+                        prompt_context = self._domain_service.get_prompt_context(
+                            domain_info.domain
+                        )
+                except DomainServiceError as exc:
+                    raise ValueError(f"Domain detection failed: {exc}") from exc
+                stage_timings["domain_seconds"] = time.perf_counter() - stage_started
+                self._complete_stage("Domain")
 
-            self._begin_stage("Director")
-            self._emit(
-                "Stage 2/5 — Director Agent: planning four scenes…",
-                progress=0.25,
-            )
-            stage_started = time.perf_counter()
-            with self._metrics.measure(DIRECTOR_LATENCY):
-                plan = self._director_agent.run(cleaned_topic, research)
-            stage_timings["director_seconds"] = time.perf_counter() - stage_started
-            self._complete_stage("Director")
-            self._emit(
-                "Director complete "
-                f"({stage_timings['director_seconds']:.1f}s) — "
-                f"{len(plan.scenes)} scenes",
-                progress=0.42,
-            )
-            for scene in plan.scenes:
-                self._emit(f"  Scene {scene.id}: {scene.title}")
+                pipeline_context = PipelineContext(
+                    topic=cleaned_topic,
+                    domain_info=domain_info,
+                    prompt_context=prompt_context,
+                )
+                self._log_domain_selection(pipeline_context)
 
-            self._emit(
-                "Stage 3–4/5 — Prompt + Review Agents…",
-                progress=0.45,
-            )
-            storyboard, review, prompt_seconds, review_seconds = (
-                self._generate_approved_storyboard(plan, research)
-            )
-            stage_timings["prompt_seconds"] = prompt_seconds
-            stage_timings["review_seconds"] = review_seconds
-            self._emit(
-                "Storyboard approved "
-                f"(score={review.overall_score:.0f}, "
-                f"prompt={prompt_seconds:.1f}s, review={review_seconds:.1f}s)",
-                progress=0.72,
-            )
+                self._begin_stage("Research")
+                self._emit(
+                    "Stage 2/6 — Research Agent: gathering reference material…",
+                    progress=0.05,
+                )
+                stage_started = time.perf_counter()
+                with profiler.measure(STAGE_RESEARCH):
+                    research = self._research_agent.run(
+                        cleaned_topic,
+                        domain_info=pipeline_context.domain_info,
+                    )
+                stage_timings["research_seconds"] = time.perf_counter() - stage_started
+                self._complete_stage("Research")
+                self._emit(
+                    "Research complete "
+                    f"({stage_timings['research_seconds']:.1f}s) — "
+                    f"location={research.location or 'n/a'}, "
+                    f"people={len(research.key_people)}, "
+                    f"events={len(getattr(research, 'important_events', []) or [])}",
+                    progress=0.22,
+                )
 
-            self._begin_stage("Images")
-            self._emit("Stage 5/5 — Image generation…", progress=0.75)
-            stage_started = time.perf_counter()
-            final_storyboard, images = self._render_storyboard_images(storyboard)
-            stage_timings["image_seconds"] = time.perf_counter() - stage_started
-            self._complete_stage("Images")
-            self._emit(
-                f"Image stage complete ({stage_timings['image_seconds']:.1f}s) — "
-                f"{sum(1 for item in images if item.url)}/"
-                f"{len(images)} scenes with URLs",
-                progress=0.98,
-            )
+                profiles = profiles_from_research(research)
+                persist_character_profiles(profiles)
+                character_bible = format_character_bible(profiles)
+                self._publish(
+                    ResearchCompleted(
+                        topic=cleaned_topic,
+                        time_period=research.time_period,
+                        location=research.location,
+                    )
+                )
 
-            total = time.perf_counter() - started
-            self._emit(f"Pipeline finished in {total:.1f}s", progress=1.0)
+                self._begin_stage("Director")
+                self._emit(
+                    "Stage 3/6 — Director Agent: planning four scenes…",
+                    progress=0.25,
+                )
+                stage_started = time.perf_counter()
+                with profiler.measure(STAGE_DIRECTOR):
+                    plan = self._director_agent.run(
+                        cleaned_topic,
+                        research,
+                        domain_info=pipeline_context.domain_info,
+                        character_bible=character_bible,
+                    )
+                stage_timings["director_seconds"] = time.perf_counter() - stage_started
+                self._complete_stage("Director")
+                self._emit(
+                    "Director complete "
+                    f"({stage_timings['director_seconds']:.1f}s) — "
+                    f"{len(plan.scenes)} scenes",
+                    progress=0.42,
+                )
+                for scene in plan.scenes:
+                    self._emit(f"  Scene {scene.id}: {scene.title}")
+                self._publish(
+                    DirectorCompleted(
+                        topic=cleaned_topic,
+                        scene_count=len(plan.scenes),
+                    )
+                )
+
+                self._emit(
+                    "Stage 4–5/6 — Prompt + Review Agents…",
+                    progress=0.45,
+                )
+                storyboard, review, prompt_seconds, review_seconds = (
+                    self._generate_approved_storyboard(
+                        plan,
+                        research,
+                        context=pipeline_context,
+                        profiler=profiler,
+                        character_bible=character_bible,
+                    )
+                )
+                stage_timings["prompt_seconds"] = prompt_seconds
+                stage_timings["review_seconds"] = review_seconds
+                self._emit(
+                    "Storyboard approved "
+                    f"(score={review.overall_score:.0f}, "
+                    f"prompt={prompt_seconds:.1f}s, review={review_seconds:.1f}s)",
+                    progress=0.72,
+                )
+
+                max_cost = settings.pipeline.max_cost_usd
+                spent = profiler.cost_tracker.total_llm_cost
+                if max_cost > 0 and spent >= max_cost:
+                    warning = (
+                        f"Cost cap reached (${spent:.4f} >= ${max_cost:.4f}); "
+                        "skipping image generation"
+                    )
+                    self.logger.warning("event=cost_cap_skip_images %s", warning)
+                    self._emit(warning, progress=0.75)
+                    images = [
+                        GeneratedImageInfo(
+                            scene_id=scene.id,
+                            title=scene.title,
+                            prompt=scene.image_prompt or scene.description,
+                            url=None,
+                            status=f"Skipped: cost cap (${max_cost:.2f})",
+                        )
+                        for scene in storyboard.scenes
+                    ]
+                    final_storyboard = storyboard
+                    stage_timings["image_seconds"] = 0.0
+                else:
+                    self._begin_stage("Images")
+                    self._emit("Stage 6/6 — Image generation…", progress=0.75)
+                    stage_started = time.perf_counter()
+                    final_storyboard, images = self._render_storyboard_images(
+                        storyboard,
+                        topic=cleaned_topic,
+                        profiler=profiler,
+                    )
+                    stage_timings["image_seconds"] = time.perf_counter() - stage_started
+                    self._complete_stage("Images")
+                    self._emit(
+                        f"Image stage complete ({stage_timings['image_seconds']:.1f}s) — "
+                        f"{sum(1 for item in images if item.url)}/"
+                        f"{len(images)} scenes with URLs",
+                        progress=0.98,
+                    )
+
+                total = time.perf_counter() - started
+                self._emit(f"Pipeline finished in {total:.1f}s", progress=1.0)
+
+                pipeline_report = (
+                    profiler.pipeline_report or profiler.build_pipeline_report()
+                )
+                result = PipelineResult(
+                    topic=cleaned_topic,
+                    research=research,
+                    plan=plan,
+                    storyboard=final_storyboard,
+                    review=review,
+                    images=images,
+                    metrics=self._studio_metrics_snapshot(
+                        stage_timings,
+                        profiler_report=profiler.report,
+                        pipeline_report=pipeline_report,
+                    ),
+                    domain_info=pipeline_context.domain_info,
+                    prompt_context=pipeline_context.prompt_context,
+                    context=pipeline_context,
+                    using_stub_services=self._using_stub_services,
+                    character_bible=character_bible,
+                )
+                self._maybe_persist_result(result)
+        except Exception as exc:
+            run_error = f"{type(exc).__name__}: {exc}"
+            raise
         finally:
-            self._metrics.record_pipeline_duration(time.perf_counter() - started)
+            profiler.finish(error=run_error)
+            export_path = settings.monitoring.export_path.strip()
+            if export_path:
+                try:
+                    profiler.export_json(export_path)
+                except Exception as exc:  # noqa: BLE001 - export is best-effort
+                    self.logger.warning(
+                        "event=metrics_export_failed path=%r error=%s",
+                        export_path,
+                        exc,
+                    )
+            profiler.log_report()
             self._unbind_step_loggers()
             self._reporter = None
 
+        assert research is not None
+        assert plan is not None
+        assert review is not None
+        assert final_storyboard is not None
+        pipeline_report = profiler.pipeline_report or profiler.build_pipeline_report()
         return PipelineResult(
             topic=cleaned_topic,
             research=research,
@@ -261,8 +470,74 @@ class DirectorPipeline:
             storyboard=final_storyboard,
             review=review,
             images=images,
-            metrics=self._studio_metrics_snapshot(stage_timings),
+            metrics=self._studio_metrics_snapshot(
+                stage_timings,
+                profiler_report=profiler.report,
+                pipeline_report=pipeline_report,
+            ),
+            domain_info=(
+                pipeline_context.domain_info if pipeline_context is not None else None
+            ),
+            prompt_context=(
+                pipeline_context.prompt_context if pipeline_context is not None else None
+            ),
+            context=pipeline_context,
+            using_stub_services=self._using_stub_services,
+            character_bible=character_bible,
         )
+
+    def _maybe_persist_result(self, result: PipelineResult) -> None:
+        """Persist pipeline artifacts when configured and DATABASE_URL is set."""
+        settings = get_settings()
+        db_url = settings.database.url.get_secret_value().strip()
+        if not settings.pipeline.persist_pipeline_runs or not db_url:
+            return
+        try:
+            from src.playground.persistence import sync_pipeline_result
+
+            sync_pipeline_result(result, metrics=result.metrics)
+        except Exception as exc:  # noqa: BLE001 - persistence is best-effort
+            self.logger.warning(
+                "event=pipeline_persist_skipped topic=%r error=%s",
+                result.topic,
+                exc,
+            )
+
+    def _publish(self, event: Event) -> None:
+        """Publish ``event`` when an event bus is configured."""
+        bus = self._event_bus
+        if bus is None:
+            return
+        try:
+            bus.publish(event)
+        except Exception as exc:  # noqa: BLE001 - do not fail the pipeline
+            self.logger.warning(
+                "event=event_bus_publish_failed type=%s error=%s",
+                type(event).__name__,
+                exc,
+            )
+
+    def _log_domain_selection(self, context: PipelineContext) -> None:
+        """Emit operator logs for domain / style / camera selection."""
+        info = context.domain_info
+        prompt_ctx = context.prompt_context
+        self.logger.info(
+            "event=domain_detected topic=%r domain=%s confidence=%.3f "
+            "style_pack=%r camera_preset=%r lighting_preset=%r",
+            context.topic,
+            info.domain.value,
+            info.confidence,
+            prompt_ctx.style[:120],
+            prompt_ctx.camera[:120],
+            prompt_ctx.lighting[:120],
+        )
+        self._emit(
+            f"Detected domain={info.domain.value} "
+            f"(confidence={info.confidence:.2f})",
+            progress=0.04,
+        )
+        self._emit(f"Selected style pack: {prompt_ctx.style[:160]}")
+        self._emit(f"Selected camera preset: {prompt_ctx.camera[:160]}")
 
     def _bind_step_loggers(self) -> None:
         """Attach fine-grained step logging to agents and LLM clients."""
@@ -328,6 +603,10 @@ class DirectorPipeline:
         self,
         plan: DirectorPlan,
         research: ResearchResult,
+        *,
+        context: PipelineContext,
+        profiler: PipelineProfiler,
+        character_bible: str = "",
     ) -> tuple[Storyboard, ReviewResult, float, float]:
         """Generate and review storyboards until one passes or retries expire.
 
@@ -339,6 +618,12 @@ class DirectorPipeline:
         last_review: ReviewResult | None = None
         prompt_seconds = 0.0
         review_seconds = 0.0
+        settings = get_settings()
+        optimizer = (
+            PromptOptimizer(composer=self._prompt_composer)
+            if settings.pipeline.prompt_optimizer_enabled
+            else None
+        )
 
         for attempt in range(1, total_attempts + 1):
             # Prompt/review share 0.45 → 0.72 of the bar across attempts.
@@ -349,14 +634,32 @@ class DirectorPipeline:
             self._set_stage("Prompt", 0.15)
             self._emit(
                 f"Prompt Agent attempt {attempt}/{total_attempts}: "
-                "writing SDXL image prompts…",
+                "writing scene content and composing FLUX prompts…",
                 progress=attempt_base,
             )
             stage_started = time.perf_counter()
-            with self._metrics.measure(PROMPT_LATENCY):
-                storyboard = self._prompt_agent.run(plan, research)
+            with profiler.measure(STAGE_PROMPT):
+                storyboard = self._prompt_agent.run(
+                    plan,
+                    research,
+                    domain_info=context.domain_info,
+                    prompt_context=context.prompt_context,
+                    character_bible=character_bible,
+                )
+                if optimizer is not None:
+                    storyboard = self._optimize_storyboard_prompts(
+                        storyboard,
+                        context.prompt_context,
+                        optimizer=optimizer,
+                    )
             prompt_seconds += time.perf_counter() - stage_started
             self._complete_stage("Prompt")
+            self._publish(
+                PromptCompleted(
+                    topic=plan.topic,
+                    scene_count=len(storyboard.scenes),
+                )
+            )
             self._emit(
                 f"Prompt Agent finished attempt {attempt} "
                 f"({time.perf_counter() - stage_started:.1f}s) — "
@@ -372,11 +675,21 @@ class DirectorPipeline:
                 progress=attempt_base + attempt_span * 0.55,
             )
             stage_started = time.perf_counter()
-            with self._metrics.measure(REVIEW_LATENCY):
-                review = self._review_agent.run(storyboard)
+            with profiler.measure(STAGE_REVIEW):
+                review = self._review_agent.run(
+                    storyboard,
+                    domain_info=context.domain_info,
+                )
             review_seconds += time.perf_counter() - stage_started
             last_review = review
             self._complete_stage("Review")
+            self._publish(
+                ReviewCompleted(
+                    topic=plan.topic,
+                    overall_score=review.overall_score,
+                    approved=review.approved,
+                )
+            )
 
             self.logger.info(
                 "event=storyboard_review topic=%r attempt=%s/%s "
@@ -389,7 +702,7 @@ class DirectorPipeline:
             )
             self._emit(
                 f"Review score={review.overall_score:.0f} "
-                f"history={review.historical_accuracy:.0f} "
+                f"domain={review.domain_accuracy:.0f} "
                 f"visual={review.visual_quality:.0f} "
                 f"continuity={review.scene_continuity:.0f} "
                 f"prompts={review.prompt_quality:.0f} "
@@ -404,6 +717,7 @@ class DirectorPipeline:
 
             if attempt < total_attempts:
                 self._metrics.record_retry(1)
+                profiler.record_storyboard_retry(1)
                 self._emit(
                     "Storyboard rejected — regenerating prompts "
                     f"(retry {attempt}/{self._max_storyboard_retries})"
@@ -438,18 +752,73 @@ class DirectorPipeline:
             review=last_review,
         )
 
+    def _optimize_storyboard_prompts(
+        self,
+        storyboard: Storyboard,
+        prompt_context: object,
+        *,
+        optimizer: PromptOptimizer,
+    ) -> Storyboard:
+        """Replace each scene's image_prompt with the best optimizer variant."""
+        from src.domain.prompt_context import DomainPromptContext
+
+        if not isinstance(prompt_context, DomainPromptContext):
+            return storyboard
+
+        optimized: list[Scene] = []
+        for scene in storyboard.scenes:
+            # Prefer the PromptAgent subject lead-in over the scene title so
+            # optimizer variants preserve composed meaning.
+            subject_hint: str | None = None
+            if scene.image_prompt and scene.image_prompt.strip():
+                subject_hint = scene.image_prompt.split(",", 1)[0].strip() or None
+            try:
+                variants = optimizer.optimize(
+                    scene,
+                    prompt_context,
+                    subject=subject_hint,
+                )
+            except Exception as exc:  # noqa: BLE001 - keep original prompt
+                self.logger.warning(
+                    "event=prompt_optimize_skipped scene_id=%s error=%s",
+                    scene.id,
+                    exc,
+                )
+                optimized.append(scene)
+                continue
+            if not variants:
+                optimized.append(scene)
+                continue
+            best = variants[0]
+            optimized.append(
+                scene.model_copy(update={"image_prompt": best.positive_prompt})
+            )
+            self.logger.info(
+                "event=prompt_optimized scene_id=%s style=%s score=%s",
+                scene.id,
+                best.style_name,
+                best.metadata.get("score"),
+            )
+        return storyboard.model_copy(update={"scenes": optimized})
+
     def _render_storyboard_images(
         self,
         storyboard: Storyboard,
+        *,
+        topic: str,
+        profiler: PipelineProfiler | None = None,
     ) -> tuple[Storyboard, list[GeneratedImageInfo]]:
-        """Render every storyboard scene concurrently, preserving order.
+        """Submit all scene jobs, then poll/upload concurrently.
 
-        Uses :class:`~concurrent.futures.ThreadPoolExecutor` so RunPod/R2 I/O
-        overlaps across scenes. A failure on one scene does not cancel the
-        others; errors are attached to the corresponding :class:`Scene`.
+        Uses :class:`~src.services.parallel_images.ParallelImageOrchestrator`
+        so every job is submitted immediately and polled with
+        ``max_parallel_images`` workers. Scene order is preserved; one failure
+        does not cancel the others (failed scenes are retried individually).
 
         Args:
             storyboard: Approved storyboard with image prompts.
+            topic: Pipeline topic used for image-generated events.
+            profiler: Optional profiler that receives image timing breakdowns.
 
         Returns:
             A complete storyboard (scenes in original order, each with
@@ -460,169 +829,96 @@ class DirectorPipeline:
         if scene_count == 0:
             return storyboard, []
 
+        max_parallel = min(scene_count, self._max_parallel_images)
         self._emit(
-            f"Rendering {scene_count} scenes concurrently "
-            f"(max_workers={scene_count})…"
+            f"Rendering {scene_count} scenes in parallel "
+            f"(max_parallel_images={max_parallel})…"
         )
-        for index, scene in enumerate(scenes):
-            image_number = index + 1
-            self._set_stage("Images", image_number / (scene_count * 2))
-            self._emit(
-                f"Generating image {image_number}/{scene_count}...",
-                progress=0.75 + (0.05 * (index / scene_count)),
-            )
-            self._emit(
-                f"  Queued scene {scene.id}: {scene.title} "
-                f"({len(scene.image_prompt or '')} chars)"
-            )
+        self._set_stage("Images", 0.1)
 
-        # Preserve input order: index → (Scene, GeneratedImageInfo).
-        ordered: list[tuple[Scene, GeneratedImageInfo] | None] = [None] * scene_count
-        completed = 0
+        completed = {"n": 0}
 
-        with ThreadPoolExecutor(max_workers=scene_count) as executor:
-            future_to_index = {
-                executor.submit(self._render_scene_safe, scene): index
-                for index, scene in enumerate(scenes)
-            }
-            for future in as_completed(future_to_index):
-                index = future_to_index[future]
-                source = scenes[index]
-                try:
-                    rendered, info = future.result()
-                except Exception as exc:  # noqa: BLE001 - isolate worker crashes
-                    self.logger.exception(
-                        "event=image_render_worker_crashed scene_id=%s title=%r",
-                        source.id,
-                        source.title,
-                    )
-                    error_message = f"{type(exc).__name__}: {exc}"
-                    rendered = source.model_copy(
-                        update={"image": None, "error": error_message}
-                    )
-                    info = GeneratedImageInfo(
-                        scene_id=source.id,
-                        title=source.title,
-                        prompt=source.image_prompt or source.description,
-                        url=None,
-                        status=f"Failed: {error_message}",
-                    )
+        def _on_progress(message: str) -> None:
+            self._emit(message)
 
-                ordered[index] = (rendered, info)
-                completed += 1
-                image_number = index + 1
-                self._set_stage("Images", 0.5 + (0.5 * (completed / scene_count)))
-                progress = 0.80 + (0.18 * (completed / scene_count))
-                self._emit(
-                    f"Completed image {image_number}/{scene_count}... "
-                    f"({info.status}"
-                    + (f" → {info.url}" if info.url else "")
-                    + ")",
-                    progress=progress,
+        def _on_scene_done(info: GeneratedImageInfo) -> None:
+            completed["n"] += 1
+            self._publish(
+                ImageGenerated(
+                    topic=topic,
+                    scene_id=info.scene_id,
+                    prompt=info.prompt,
+                    url=info.url,
                 )
+            )
+            if info.url:
+                self._metrics.record_images_generated(1)
+            self._set_stage("Images", 0.2 + (0.8 * (completed["n"] / scene_count)))
+            progress = 0.80 + (0.18 * (completed["n"] / scene_count))
+            self._emit(
+                f"Completed image {info.scene_id}/{scene_count}... "
+                f"({info.status}"
+                + (f" → {info.url}" if info.url else "")
+                + ")",
+                progress=progress,
+            )
 
-        rendered_scenes = [item[0] for item in ordered if item is not None]
-        images = [item[1] for item in ordered if item is not None]
-        # Defensive: keep length/order identical to the input storyboard.
-        if len(rendered_scenes) != scene_count:
+        backend = resolve_image_backend(self._image_generator)
+        orchestrator = ParallelImageOrchestrator(
+            backend,
+            self._storage_client,
+            max_parallel_images=max_parallel,
+            max_retries=1,
+            on_progress=_on_progress,
+            on_scene_complete=_on_scene_done,
+            using_stub_services=self._using_stub_services,
+        )
+
+        with self._metrics.measure(RUNPOD_LATENCY):
+            batch = orchestrator.render(scenes)
+
+        if profiler is not None:
+            profiler.record_image_batch(
+                timings=[timing.to_dict() for timing in batch.timings],
+                total_parallel_ms=batch.total_parallel_ms,
+            )
+
+        if len(batch.scenes) != scene_count:
             raise RuntimeError(
-                "Concurrent image stage lost scenes: "
-                f"expected {scene_count}, got {len(rendered_scenes)}"
+                "Parallel image stage lost scenes: "
+                f"expected {scene_count}, got {len(batch.scenes)}"
             )
 
         return (
-            storyboard.model_copy(update={"scenes": rendered_scenes}),
-            images,
+            storyboard.model_copy(update={"scenes": batch.scenes}),
+            batch.images,
         )
-
-    def _render_scene_safe(self, scene: Scene) -> tuple[Scene, GeneratedImageInfo]:
-        """Render one scene image without letting failures abort the pool.
-
-        Logs wall-clock latency for the scene on both success and failure.
-        Successful renders attach an :class:`ImageResult`; failures attach an
-        ``error`` string on the :class:`Scene` and leave ``image`` as ``None``.
-        """
-        prompt = scene.image_prompt or scene.description
-        started = time.perf_counter()
-        try:
-            with self._metrics.measure(RUNPOD_LATENCY):
-                image = self._image_generator.generate(prompt)
-
-            if not isinstance(image, ImageResult):
-                raise TypeError(
-                    "ImageGenerator.generate must return ImageResult, got "
-                    f"{type(image).__name__}"
-                )
-
-            if image.url is None and image.b64:
-                with self._metrics.measure(CLOUDFLARE_UPLOAD_LATENCY):
-                    url = self._storage_client.upload(
-                        base64.b64decode(image.b64),
-                        content_type="image/png",
-                    )
-                image = image.model_copy(update={"url": url})
-
-            elapsed = time.perf_counter() - started
-            self._metrics.record_images_generated(1)
-            self.logger.info(
-                "event=image_scene_latency scene_id=%s title=%r "
-                "status=ok seconds=%.3f url=%r",
-                scene.id,
-                scene.title,
-                elapsed,
-                image.url,
-            )
-            info = GeneratedImageInfo(
-                scene_id=scene.id,
-                title=scene.title,
-                prompt=prompt,
-                url=image.url,
-                status="ok" if image.url else "Generated (no public URL)",
-            )
-            return (
-                scene.model_copy(update={"image": image, "error": None}),
-                info,
-            )
-        except Exception as exc:  # noqa: BLE001 - keep remaining scenes alive
-            elapsed = time.perf_counter() - started
-            error_message = f"{type(exc).__name__}: {exc}"
-            self.logger.exception(
-                "event=image_render_failed scene_id=%s title=%r "
-                "seconds=%.3f error=%s",
-                scene.id,
-                scene.title,
-                elapsed,
-                error_message,
-            )
-            self.logger.info(
-                "event=image_scene_latency scene_id=%s title=%r "
-                "status=failed seconds=%.3f",
-                scene.id,
-                scene.title,
-                elapsed,
-            )
-            info = GeneratedImageInfo(
-                scene_id=scene.id,
-                title=scene.title,
-                prompt=prompt,
-                url=None,
-                status=f"Failed: {error_message}",
-            )
-            return (
-                scene.model_copy(update={"image": None, "error": error_message}),
-                info,
-            )
 
     def _studio_metrics_snapshot(
         self,
         stage_timings: dict[str, float] | None = None,
+        *,
+        profiler_report: object | None = None,
+        pipeline_report: object | None = None,
     ) -> dict[str, object]:
         """Flatten metrics into the shape expected by the Streamlit dashboard."""
         snap = self._metrics.snapshot()
         latency = snap.get("latency", {})
         tokens = snap.get("tokens", {})
         timings = stage_timings or {}
-        return {
+        profiler_payload: dict[str, object] = {}
+        if profiler_report is not None and hasattr(profiler_report, "to_dict"):
+            profiler_payload = profiler_report.to_dict()  # type: ignore[assignment]
+
+        report_fields: dict[str, object] = {}
+        if isinstance(pipeline_report, PipelineReport):
+            report_fields = report_to_dashboard_metrics(pipeline_report)
+        elif pipeline_report is not None and hasattr(pipeline_report, "to_dict"):
+            report_fields = {
+                "pipeline_report": pipeline_report.to_dict(),  # type: ignore[union-attr]
+            }
+
+        payload: dict[str, object] = {
             "pipeline_duration_seconds": latency.get(TOTAL_LATENCY, {}).get(
                 "total_seconds",
                 0.0,
@@ -656,6 +952,7 @@ class DirectorPipeline:
                 6,
             ),
             "image_seconds": round(timings.get("image_seconds", 0.0), 6),
+            "domain_seconds": round(timings.get("domain_seconds", 0.0), 6),
             "runpod_latency_average_seconds": latency.get(RUNPOD_LATENCY, {}).get(
                 "average_seconds",
                 0.0,
@@ -682,5 +979,11 @@ class DirectorPipeline:
             "images_generated": snap.get("image_count", 0),
             "image_count": snap.get("image_count", 0),
             "retry_count": snap.get("retry_count", 0),
+            "profiler": profiler_payload,
+            "using_stub_services": self._using_stub_services,
             "raw": snap,
         }
+        # Sprint 4.2 fields overlay timing/cost keys when a full report exists.
+        payload.update(report_fields)
+        payload["using_stub_services"] = self._using_stub_services
+        return payload

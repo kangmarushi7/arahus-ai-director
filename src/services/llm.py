@@ -1,23 +1,53 @@
-"""OpenAI-compatible LLM client that returns validated Pydantic models."""
+"""Compatibility LLM client that returns validated Pydantic models.
+
+Agents continue to call :meth:`LLMClient.generate_json`. Internally this client
+routes through :class:`~src.llm.client.LLM` (``llm.generate(task=..., ...)``)
+so OpenRouter details stay behind the provider abstraction.
+"""
 
 from __future__ import annotations
 
 import json
 import logging
 import re
+import threading
 import time
 from collections.abc import Callable
 from typing import Type, TypeVar
 
-from openai import APIError, APITimeoutError, OpenAI, RateLimitError
 from pydantic import BaseModel, ValidationError
+
+from src.cache.llm_cache import LLMCache
+from src.config import get_settings
+from src.llm import LLM, LLMProviderError, LLMResponse, get_llm
+from src.llm.exceptions import LLMError
 
 T = TypeVar("T", bound=BaseModel)
 
-# Matches ```json ... ``` or ``` ... ``` fences LLMs occasionally wrap around JSON.
+_CACHEABLE_TASKS = frozenset({"domain"})
+_shared_cache: LLMCache | None = None
+_shared_cache_lock = threading.Lock()
+
+
+def _task_cache() -> LLMCache | None:
+    """Return the shared LLM cache when enabled for cacheable tasks."""
+    global _shared_cache
+    if not get_settings().pipeline.llm_cache_enabled:
+        return None
+    with _shared_cache_lock:
+        if _shared_cache is None:
+            _shared_cache = LLMCache()
+        return _shared_cache
+
+
 _FENCE_RE = re.compile(
     r"^```(?:json)?\s*(.*?)\s*```$",
     re.DOTALL | re.IGNORECASE,
+)
+
+_JSON_SYSTEM = (
+    "You are a careful assistant that returns only valid JSON matching the "
+    "user's schema. Never wrap the JSON in markdown."
 )
 
 
@@ -55,153 +85,134 @@ class LLMValidationError(LLMClientError):
 
 
 class LLMClient:
-    """Thin client that turns a prompt into a validated Pydantic model.
-
-    Provider transport details (OpenAI-compatible chat completions) stay inside
-    this class so agents only depend on :meth:`generate_json`. Model, sampling,
-    and endpoint settings are injected — never hardcoded.
-    """
+    """Agent-facing client: prompt → validated Pydantic model via LLM router."""
 
     def __init__(
         self,
-        api_key: str,
-        base_url: str,
-        model: str,
-        temperature: float,
-        max_tokens: int,
+        api_key: str = "",
+        base_url: str = "",
+        model: str = "",
+        temperature: float = 0.2,
+        max_tokens: int = 4000,
+        *,
+        task: str = "general",
+        llm: LLM | None = None,
     ) -> None:
-        """Configure the OpenAI-compatible client.
+        """Configure the compatibility client.
 
-        Args:
-            api_key: Provider API key.
-            base_url: Provider base URL, e.g. OpenRouter's ``/api/v1``.
-            model: Model identifier, e.g. ``openai/gpt-oss-20b:free``.
-            temperature: Sampling temperature for every request.
-            max_tokens: Maximum completion tokens for every request.
+        ``api_key`` / ``base_url`` are accepted for backwards compatibility but
+        routing/credentials come from the injected :class:`~src.llm.client.LLM`
+        (YAML + env). ``model`` overrides the task's configured model when set.
         """
-        if not api_key.strip():
-            raise ValueError("api_key must be a non-empty string")
-        if not base_url.strip():
-            raise ValueError("base_url must be a non-empty string")
-        if not model.strip():
-            raise ValueError("model must be a non-empty string")
         if max_tokens < 1:
             raise ValueError("max_tokens must be a positive integer")
+        if not isinstance(task, str) or not task.strip():
+            raise ValueError("task must be a non-empty string")
 
-        self.api_key = api_key.strip()
-        self.base_url = base_url.strip().rstrip("/")
-        self.model = model.strip()
+        self.api_key = (api_key or "").strip()
+        self.base_url = (base_url or "").strip().rstrip("/")
+        self.model = (model or "").strip()
         self.temperature = temperature
         self.max_tokens = max_tokens
-        self._client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+        self.task = task.strip().lower()
+        self._llm = llm
         self.progress_callback: Callable[[str], None] | None = None
         self._logger = logging.getLogger(self.__class__.__name__)
+        self.last_response: LLMResponse | None = None
+
+    def _resolve_llm(self) -> LLM:
+        return self._llm if self._llm is not None else get_llm()
 
     def _log_progress(self, message: str) -> None:
-        """Forward a step line to the optional progress sink."""
         if self.progress_callback is not None:
             try:
                 self.progress_callback(message)
-            except Exception:  # noqa: BLE001 - UI sinks must not break LLM calls
+            except Exception:  # noqa: BLE001
                 self._logger.exception("progress_callback failed")
 
     def generate_json(self, prompt: str, response_model: Type[T]) -> T:
-        """Send ``prompt`` to the LLM and return a validated ``response_model``.
-
-        Args:
-            prompt: Instruction text for the model.
-            response_model: Pydantic model class used for validation.
-
-        Returns:
-            An instance of ``response_model``.
-
-        Raises:
-            ValueError: If ``prompt`` is empty.
-            LLMRequestError: If the provider request fails.
-            LLMJSONParseError: If the response is not valid JSON.
-            LLMValidationError: If JSON does not match ``response_model``.
-        """
+        """Send ``prompt`` through the LLM router and validate JSON."""
         if not prompt.strip():
             raise ValueError("prompt must be a non-empty string")
 
+        model_label = self.model or self.task
+        cache = _task_cache() if self.task in _CACHEABLE_TASKS else None
+        cache_model = self.model or f"task:{self.task}"
+        if cache is not None:
+            cached = cache.get(cache_model, self.temperature, prompt)
+            if cached is not None:
+                self._log_progress(
+                    f"LLM [{model_label}] cache hit → {response_model.__name__}"
+                )
+                return self._validate(cached, response_model, raw_text=json.dumps(cached))
+
         self._log_progress(
-            f"LLM [{self.model}] sending request "
+            f"LLM [{model_label}] sending request "
             f"({len(prompt)} chars → {response_model.__name__})"
         )
         started = time.perf_counter()
-        raw_text = self._request_json_text(prompt)
-        self._log_progress(
-            f"LLM [{self.model}] response received "
-            f"({len(raw_text)} chars in {time.perf_counter() - started:.1f}s)"
-        )
-
-        self._log_progress(f"LLM [{self.model}] parsing JSON…")
-        data = self._parse_json(raw_text)
-
-        self._log_progress(
-            f"LLM [{self.model}] validating {response_model.__name__}…"
-        )
-        result = self._validate(data, response_model, raw_text=raw_text)
-        self._log_progress(
-            f"LLM [{self.model}] validated {response_model.__name__} OK"
-        )
-        return result
-
-    def _request_json_text(self, prompt: str) -> str:
-        """Call the provider and return the assistant message content."""
         try:
-            completion = self._client.chat.completions.create(
-                model=self.model,
+            response = self._resolve_llm().generate(
+                task=self.task,
                 messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a careful assistant that returns only "
-                            "valid JSON matching the user's schema. "
-                            "Never wrap the JSON in markdown."
-                        ),
-                    },
+                    {"role": "system", "content": _JSON_SYSTEM},
                     {"role": "user", "content": prompt},
                 ],
-                response_format={"type": "json_object"},
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
+                response_format={"type": "json_object"},
+                model=self.model or None,
             )
-        except (APIError, APITimeoutError, RateLimitError) as exc:
+        except LLMProviderError as exc:
             raise LLMRequestError(
-                f"LLM request failed for model '{self.model}': {exc}"
+                f"LLM request failed for task '{self.task}' model "
+                f"'{self.model or 'route-default'}': {exc}"
             ) from exc
-        except Exception as exc:  # noqa: BLE001 - isolate provider SDK quirks
+        except LLMError as exc:
             raise LLMRequestError(
-                f"Unexpected LLM client error for model '{self.model}': {exc}"
+                f"LLM router error for task '{self.task}': {exc}"
             ) from exc
-
-        try:
-            content = completion.choices[0].message.content
-        except (AttributeError, IndexError, TypeError) as exc:
+        except Exception as exc:  # noqa: BLE001
             raise LLMRequestError(
-                "LLM response did not include message content"
+                f"Unexpected LLM client error for task '{self.task}': {exc}"
             ) from exc
 
-        if not isinstance(content, str) or not content.strip():
-            raise LLMRequestError("LLM returned an empty response")
+        self.last_response = response
+        raw_text = response.text
+        self._log_progress(
+            f"LLM [{response.model}] response received "
+            f"({len(raw_text)} chars in {time.perf_counter() - started:.1f}s, "
+            f"cost≈{response.estimated_cost:.6f})"
+        )
 
-        return content.strip()
+        self._log_progress(f"LLM [{response.model}] parsing JSON…")
+        data = self._parse_json(raw_text)
+        self._log_progress(f"LLM [{response.model}] validating {response_model.__name__}…")
+        result = self._validate(data, response_model, raw_text=raw_text)
+        if cache is not None:
+            try:
+                cache.set(
+                    cache_model,
+                    self.temperature,
+                    prompt,
+                    result.model_dump(mode="json"),
+                )
+            except Exception:  # noqa: BLE001
+                self._logger.exception("event=llm_cache_set_failed task=%s", self.task)
+        self._log_progress(f"LLM [{response.model}] validated {response_model.__name__} OK")
+        return result
 
     def _parse_json(self, raw_text: str) -> object:
-        """Parse JSON, stripping accidental markdown fences if present."""
         candidate = raw_text.strip()
         fence_match = _FENCE_RE.match(candidate)
         if fence_match:
             candidate = fence_match.group(1).strip()
-
         try:
             return json.loads(candidate)
         except json.JSONDecodeError as exc:
             preview = candidate[:500]
             raise LLMJSONParseError(
-                f"Failed to parse LLM response as JSON: {exc}. "
-                f"Preview: {preview!r}",
+                f"Failed to parse LLM response as JSON: {exc}. Preview: {preview!r}",
                 raw_text=raw_text,
             ) from exc
 
@@ -212,13 +223,11 @@ class LLMClient:
         *,
         raw_text: str,
     ) -> T:
-        """Validate parsed data against ``response_model``."""
         try:
             return response_model.model_validate(data)
         except ValidationError as exc:
             raise LLMValidationError(
-                f"LLM JSON failed validation for "
-                f"{response_model.__name__}: {exc}",
+                f"LLM JSON failed validation for {response_model.__name__}: {exc}",
                 raw_text=raw_text,
                 data=data,
                 cause=exc,

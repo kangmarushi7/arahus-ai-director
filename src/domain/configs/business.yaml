@@ -1,0 +1,43 @@
+domain: business
+
+style: >
+  professional corporate photography, calm confident tone, natural office realism,
+  neutral wardrobe and polished environments
+
+camera: >
+  35-50mm meeting coverage, over-shoulder boardroom, stable handheld or tripod,
+  conversational framing
+
+lighting: >
+  natural office light, soft window fill, even faces, avoid extreme contrast
+
+color_palette: >
+  neutrals, navy, soft gray, warm wood, restrained accent color
+
+composition: >
+  collaborative groups, clear hierarchy of speakers, tidy desks and rooms,
+  readable body language
+
+quality_tags:
+  - highly detailed
+  - sharp focus
+  - corporate photography
+  - professional
+  - photorealistic
+
+negative_prompt: >
+  sci-fi, fantasy, horror, extreme angles, neon cyberpunk, cartoon,
+  exaggerated expressions, watermark, text
+
+image_model_defaults:
+  width: 1024
+  height: 1024
+  steps: 28
+  guidance_scale: 3.5
+  scheduler: default
+
+video_model_defaults:
+  fps: 24
+  duration_seconds: 4
+  motion_strength: 0.25
+  camera_motion: stable_handheld

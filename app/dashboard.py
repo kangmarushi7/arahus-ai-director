@@ -89,6 +89,7 @@ PLACEHOLDER_STORYBOARD: dict[str, Any] = {
 
 PLACEHOLDER_REVIEW: dict[str, Any] = {
     "overall_score": 90.0,
+    "domain_accuracy": 88.0,
     "historical_accuracy": 88.0,
     "visual_quality": 91.0,
     "scene_continuity": 93.0,
@@ -490,7 +491,7 @@ def render_review_section(review: dict[str, Any]) -> None:
 
         m1, m2, m3, m4, m5 = st.columns(5)
         m1.metric("Overall", f"{review.get('overall_score', 0):.0f}")
-        m2.metric("History", f"{review.get('historical_accuracy', 0):.0f}")
+        m2.metric("Domain", f"{review.get('domain_accuracy', review.get('historical_accuracy', 0)):.0f}")
         m3.metric("Visual", f"{review.get('visual_quality', 0):.0f}")
         m4.metric("Continuity", f"{review.get('scene_continuity', 0):.0f}")
         m5.metric("Prompts", f"{review.get('prompt_quality', 0):.0f}")
@@ -775,7 +776,7 @@ def render_prompt_playground_section(storyboard: dict[str, Any]) -> None:
                 key=prompt_key,
                 height=120,
                 label_visibility="collapsed",
-                placeholder="Write or refine the SDXL image prompt for this scene…",
+                placeholder="Write or refine the FLUX image prompt for this scene…",
             )
 
             c1, c2, c3, c4 = st.columns(4)
@@ -972,9 +973,29 @@ def main() -> None:
     topic, generate_clicked = render_topic_controls()
     console_widgets = render_live_console()
 
+    result = st.session_state.get("pipeline_result")
+    if result is not None and getattr(result, "using_stub_services", False):
+        st.error(
+            "Stub image/storage services were used for this run. "
+            "Images are unavailable. Configure RUNPOD_* and R2_* or set "
+            "ALLOW_STUB_SERVICES=true only for intentional dry-runs."
+        )
+    settings_allow = False
+    try:
+        from src.config import get_settings
+
+        settings_allow = get_settings().pipeline.allow_stub_services
+    except Exception:  # noqa: BLE001
+        settings_allow = False
+    if settings_allow:
+        st.warning(
+            "ALLOW_STUB_SERVICES=true — RunPod/R2 may be stubbed. "
+            "Do not treat missing image URLs as a successful render."
+        )
+
     if generate_clicked:
         if not topic:
-            st.warning("Enter a historical topic before generating.")
+            st.warning("Enter a topic before generating.")
         else:
             run_pipeline(topic, console_widgets)
 

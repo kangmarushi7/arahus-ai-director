@@ -1,0 +1,45 @@
+domain: education
+
+style: >
+  clear instructional visual language, approachable realism, high readability,
+  friendly contemporary look without clutter
+
+camera: >
+  eye-level 35mm, simple compositions, medium shots of subjects and materials,
+  minimal camera motion, stable framing
+
+lighting: >
+  bright even lighting, soft shadows, classroom-friendly daylight or softbox look,
+  avoid harsh contrast
+
+color_palette: >
+  clean whites, soft blues, warm wood accents, high-legibility neutrals,
+  gentle accent colors
+
+composition: >
+  centered or rule-of-thirds subject focus, uncluttered backgrounds, clear props
+  and diagrams as supporting elements
+
+quality_tags:
+  - highly detailed
+  - sharp focus
+  - clear
+  - instructional
+  - photorealistic
+
+negative_prompt: >
+  horror, gore, darkness, chaotic framing, heavy grain, distracting clutter,
+  low contrast, cartoon, watermark, text overlays
+
+image_model_defaults:
+  width: 1024
+  height: 1024
+  steps: 28
+  guidance_scale: 3.5
+  scheduler: default
+
+video_model_defaults:
+  fps: 24
+  duration_seconds: 4
+  motion_strength: 0.2
+  camera_motion: static

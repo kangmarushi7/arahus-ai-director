@@ -1,0 +1,45 @@
+domain: history
+
+style: >
+  cinematic historical drama, period-accurate costumes and architecture,
+  documentary realism, subtle film grain, restrained color grading
+
+camera: >
+  35mm anamorphic, medium-wide establishing shots, slow push-ins,
+  eye-level documentary framing, motivated camera moves
+
+lighting: >
+  natural motivated light, soft window light, torch and candle warmth where
+  period-appropriate, gentle contrast, avoid modern studio spill
+
+color_palette: >
+  muted earth tones, ochre, umber, desaturated greens, soft parchment highlights,
+  limited modern primaries
+
+composition: >
+  classical framing, clear subject hierarchy, environmental storytelling,
+  balanced negative space, readable silhouette
+
+quality_tags:
+  - highly detailed
+  - sharp focus
+  - cinematic still
+  - period accurate
+  - photorealistic
+
+negative_prompt: >
+  modern clothing, smartphones, neon lights, sci-fi elements, anachronisms,
+  cartoon, anime, low detail, watermark, text, deformed hands
+
+image_model_defaults:
+  width: 1024
+  height: 1024
+  steps: 28
+  guidance_scale: 3.5
+  scheduler: default
+
+video_model_defaults:
+  fps: 24
+  duration_seconds: 4
+  motion_strength: 0.35
+  camera_motion: slow_push_in
