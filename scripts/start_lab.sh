@@ -1,8 +1,5 @@
 #!/usr/bin/env sh
-# Local / Railway entrypoint for Arahus Lab.
+# Local / Railway entrypoint for Arahus Lab (FastAPI).
 set -eu
-PORT="${PORT:-8501}"
-exec streamlit run app/lab.py \
-  --server.address 0.0.0.0 \
-  --server.port "$PORT" \
-  --server.headless true
+PORT="${PORT:-8000}"
+exec uvicorn src.webapp.main:app --host 0.0.0.0 --port "$PORT"

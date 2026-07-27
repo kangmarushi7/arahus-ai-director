@@ -62,41 +62,46 @@ source .venv/bin/activate
 python -m pip install -r requirements.txt
 ```
 
-### AI Director Studio (full UI)
+### AI Director Studio (Streamlit — optional full UI)
 
 ```bash
 streamlit run app/dashboard.py
 ```
 
-### Arahus Lab (simple E2E test dashboard)
+### Arahus Lab (recommended E2E test UI)
 
-Lightweight console for Railway / VPS — run the full pipeline and inspect
-domain, research, director, prompts, review, images, and metrics.
+FastAPI + clean browser UI for Railway / VPS. Enter a topic, stream live
+progress, then inspect domain, research, scenes, review, images, and metrics.
 
 ```bash
-# local (uses requirements.txt or requirements.web.txt)
-streamlit run app/lab.py
+# install web deps (no torch)
+python -m pip install -r requirements.web.txt
 
+# run locally
+uvicorn src.webapp.main:app --reload --port 8000
 # or
 sh scripts/start_lab.sh
 ```
 
+Open http://127.0.0.1:8000
+
 #### Deploy on Railway
 
-1. Create a new Railway project from this repo.
-2. Set the Dockerfile to `Dockerfile.web` (already in `railway.toml`).
-3. Add environment variables (at minimum `OPENROUTER_API_KEY`).
-   - For LLM-only dry runs without RunPod/R2: `ALLOW_STUB_SERVICES=true`
-   - For real images: `RUNPOD_API_KEY`, `RUNPOD_ENDPOINT_ID`, and all `R2_*`
-   - Optional: `DATABASE_URL` for persistence
-4. Railway sets `PORT` automatically; the container listens on it.
-5. Open the generated public URL — health check: `/_stcore/health`
+1. Create a Railway project from this repo.
+2. Dockerfile is `Dockerfile.web` (see `railway.toml`).
+3. Set environment variables:
+   - **Required:** `OPENROUTER_API_KEY`
+   - **Dry run (no images):** `ALLOW_STUB_SERVICES=true`
+   - **Real images:** `RUNPOD_API_KEY`, `RUNPOD_ENDPOINT_ID`, and all `R2_*`
+   - **Optional:** `DATABASE_URL`
+4. Railway sets `PORT` automatically.
+5. Health check: `/health`
 
 Local Docker:
 
 ```bash
 docker build -f Dockerfile.web -t arahus-lab .
-docker run --rm -p 8501:8501 --env-file .ENV arahus-lab
+docker run --rm -p 8000:8000 --env-file .ENV arahus-lab
 ```
 
 ### Benchmark suite

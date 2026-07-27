@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Arahus Lab</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=IBM+Plex+Mono:wght@400;500&family=Outfit:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="atmosphere" aria-hidden="true"></div>
+
+  <header class="top">
+    <div class="brand">
+      <p class="brand-mark">Arahus</p>
+      <p class="brand-sub">Pipeline Lab</p>
+    </div>
+    <div id="status-chips" class="chips" aria-live="polite"></div>
+  </header>
+
+  <main class="shell">
+    <section class="hero">
+      <h1>Test the director pipeline</h1>
+      <p class="lede">
+        Enter a topic. Watch every stage. Inspect research, scenes, review scores, and images.
+      </p>
+
+      <form id="run-form" class="run-form">
+        <label class="field">
+          <span>Topic</span>
+          <input
+            id="topic"
+            name="topic"
+            type="text"
+            maxlength="512"
+            placeholder="Fall of Constantinople"
+            autocomplete="off"
+            required
+          />
+        </label>
+        <div class="samples" id="samples"></div>
+        <button id="run-btn" type="submit" class="run-btn">Run pipeline</button>
+      </form>
+
+      <p id="banner" class="banner" hidden></p>
+    </section>
+
+    <section class="live" id="live" hidden>
+      <div class="live-head">
+        <h2>Live run</h2>
+        <p id="live-meta" class="live-meta">0%</p>
+      </div>
+      <div class="progress-track" aria-hidden="true">
+        <div id="progress-fill" class="progress-fill"></div>
+      </div>
+      <div id="stage-bars" class="stage-bars"></div>
+      <pre id="log" class="log" aria-live="polite"></pre>
+    </section>
+
+    <section class="results" id="results" hidden>
+      <nav class="tabs" role="tablist">
+        <button type="button" class="tab is-active" data-tab="overview">Overview</button>
+        <button type="button" class="tab" data-tab="research">Research</button>
+        <button type="button" class="tab" data-tab="scenes">Scenes</button>
+        <button type="button" class="tab" data-tab="review">Review</button>
+        <button type="button" class="tab" data-tab="images">Images</button>
+        <button type="button" class="tab" data-tab="metrics">Metrics</button>
+      </nav>
+      <div id="panel-overview" class="panel is-active"></div>
+      <div id="panel-research" class="panel"></div>
+      <div id="panel-scenes" class="panel"></div>
+      <div id="panel-review" class="panel"></div>
+      <div id="panel-images" class="panel"></div>
+      <div id="panel-metrics" class="panel"></div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <span>Arahus Lab</span>
+    <span id="foot-hint">Ready when you are</span>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
