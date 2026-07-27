@@ -1,4 +1,6 @@
-# Keep Railway / web image small (no GPU worker artifacts).
+# Shared for RunPod (Dockerfile) and Railway (Dockerfile.web).
+# Keep requirements.txt + handler.py (worker) and web/ + app/ (lab) in context.
+
 .git
 .venv
 venv
@@ -14,8 +16,5 @@ database/*.db
 .ENV
 .env.*
 !.env.example
-Dockerfile
-handler.py
-requirements.txt
 tests
 reports
