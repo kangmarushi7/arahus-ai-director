@@ -59,13 +59,20 @@ import type {
   TransitionType,
 } from "@/lib/api/types";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") ?? "";
+const API_URL = (
+  process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") ??
+  // Same-origin Railway / production default (Caddy strips /backend → API).
+  (process.env.NODE_ENV === "production" ? "/backend" : "")
+);
 const FORCE_MOCKS = process.env.NEXT_PUBLIC_USE_MOCKS === "true";
 const API_KEY =
   process.env.NEXT_PUBLIC_ARAHUS_API_KEY?.trim() ||
   process.env.NEXT_PUBLIC_API_KEY?.trim() ||
   "";
 
+function inMockMode(): boolean {
+  return FORCE_MOCKS || !API_URL;
+}
 function normalizeScene(raw: SceneCard): SceneCard {
   const reviewScore =
     raw.review_score ?? raw.review?.overall_score ?? null;
@@ -85,7 +92,7 @@ function normalizeStoryboard(board: Storyboard): Storyboard {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  if (!API_URL || FORCE_MOCKS) {
+  if (inMockMode()) {
     throw new Error("MOCK_MODE");
   }
   const response = await fetch(`${API_URL}${path}`, {
@@ -486,7 +493,7 @@ export const api = {
   },
 
   websocketUrl(projectId: string): string | null {
-    if (!API_URL || FORCE_MOCKS) return null;
+    if (inMockMode()) return null;
     const wsBase = API_URL.replace(/^http/, "ws");
     const base = `${wsBase}/ws/projects/${projectId}`;
     if (!API_KEY) return base;
@@ -495,7 +502,7 @@ export const api = {
   },
 
   usingMocks(): boolean {
-    return !API_URL || FORCE_MOCKS;
+    return inMockMode();
   },
 
   async getTimeline(projectId: string): Promise<Timeline> {

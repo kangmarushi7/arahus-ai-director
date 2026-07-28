@@ -89,21 +89,23 @@ Open http://127.0.0.1:8000
 
 1. Create a Railway project from this repo.
 2. Dockerfile is `Dockerfile.web` (see `railway.toml`).
-3. Set environment variables:
+3. The public site is **Arahus Studio** at `/`. Pipeline Lab is at `/lab`, admin logs at `/admin`.
+4. Set environment variables:
    - **Required:** `OPENROUTER_API_KEY`
    - **Dry run (no images):** `ALLOW_STUB_SERVICES=true`
    - **Real images:** `RUNPOD_API_KEY`, `RUNPOD_ENDPOINT_ID`, and all `R2_*`
-   - **Optional:** `DATABASE_URL`
-4. Railway sets `PORT` automatically.
-5. Health check: `/health`
+   - **Optional:** `DATABASE_URL`, `ARAHUS_API_KEY`
+5. Railway sets `PORT` automatically.
+6. Health check: `/health`
 
 Local Docker:
 
 ```bash
-docker build -f Dockerfile.web -t arahus-lab .
-docker run --rm -p 8000:8000 --env-file .ENV arahus-lab
+docker build -f Dockerfile.web -t arahus-web .
+docker run --rm -p 8000:8000 --env-file .ENV arahus-web
 ```
 
+Studio talks to the API on the same origin via `/backend/*` (Caddy strips the prefix).
 ### Benchmark suite
 
 ```bash

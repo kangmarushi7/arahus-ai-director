@@ -31,6 +31,9 @@ NEXT_PUBLIC_USE_MOCKS=false
 When the API URL is empty or `NEXT_PUBLIC_USE_MOCKS=true`, the UI falls back to
 local mock projects / storyboards / assets.
 
+On Railway / Docker production builds, the Studio uses same-origin
+`NEXT_PUBLIC_API_URL=/backend` (Caddy strips `/backend` to the FastAPI API).
+
 ## Pages
 
 | Route | Purpose |

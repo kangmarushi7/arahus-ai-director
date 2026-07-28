@@ -1,11 +1,47 @@
-# Slim web image for Arahus Lab (FastAPI) on Railway / any VPS.
-# Does NOT include torch/diffusers — image gen stays on RunPod.
-FROM python:3.11-slim
+# Production web image: Arahus Studio (Next.js) + FastAPI API.
+# Pipeline Lab remains at /lab; admin audit UI at /admin.
+# Does NOT include torch — image gen stays on RunPod.
+
+# ---- Studio build ----
+FROM node:22-bookworm-slim AS studio-build
+WORKDIR /studio
+COPY studio/package.json studio/package-lock.json ./
+RUN npm ci
+COPY studio/ ./
+ENV NEXT_TELEMETRY_DISABLED=1 \
+    NEXT_PUBLIC_API_URL=/backend \
+    NEXT_PUBLIC_USE_MOCKS=false \
+    NODE_ENV=production
+RUN npm run build
+
+# ---- Runtime ----
+FROM python:3.11-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    NEXT_TELEMETRY_DISABLED=1 \
+    NODE_ENV=production \
+    HOSTNAME=0.0.0.0 \
+    CADDY_VERSION=2.8.4
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && arch="$(dpkg --print-architecture)" \
+    && case "$arch" in \
+         amd64) caddy_arch=amd64 ;; \
+         arm64) caddy_arch=arm64 ;; \
+         *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+       esac \
+    && curl -fsSL \
+         "https://github.com/caddyserver/caddy/releases/download/v${CADDY_VERSION}/caddy_${CADDY_VERSION}_linux_${caddy_arch}.tar.gz" \
+       | tar -xz -C /usr/local/bin caddy \
+    && chmod +x /usr/local/bin/caddy \
+    && caddy version
+
+COPY --from=studio-build /usr/local/bin/node /usr/local/bin/node
 
 WORKDIR /app
 
@@ -18,13 +54,20 @@ COPY web/ ./web/
 COPY alembic/ ./alembic/
 COPY alembic.ini .
 COPY scripts/ ./scripts/
+COPY deploy/Caddyfile /etc/caddy/Caddyfile
+
+# Next.js standalone output (server + static assets).
+COPY --from=studio-build /studio/.next/standalone ./studio-runtime/
+COPY --from=studio-build /studio/.next/static ./studio-runtime/.next/static
+COPY --from=studio-build /studio/public ./studio-runtime/public
 
 RUN useradd --create-home --uid 10001 appuser \
-    && mkdir -p /app/.cache \
-    && chown -R appuser:appuser /app
+    && mkdir -p /app/.cache /app/artifacts \
+    && chown -R appuser:appuser /app \
+    && chmod +x /app/scripts/start_web.sh
+
 USER appuser
 
 EXPOSE 8000
 
-# Railway injects PORT; default 8000 for local docker runs.
-CMD ["sh", "-c", "uvicorn src.webapp.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+CMD ["sh", "scripts/start_web.sh"]

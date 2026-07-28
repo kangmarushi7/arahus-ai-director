@@ -1,0 +1,52 @@
+# Public entry for Railway / single-port deploys.
+# Studio (Next) is the main site; API + Lab are proxied.
+
+{
+	auto_https off
+	admin off
+}
+
+:{$PORT:8000} {
+	encode gzip
+
+	# FastAPI health (Railway probe)
+	handle /health {
+		reverse_proxy 127.0.0.1:8001
+	}
+
+	# Studio → API (strip /backend prefix)
+	handle_path /backend/* {
+		reverse_proxy 127.0.0.1:8001
+	}
+
+	# Direct API / lab / admin surfaces
+	handle /api/* {
+		reverse_proxy 127.0.0.1:8001
+	}
+	handle /ws/* {
+		reverse_proxy 127.0.0.1:8001
+	}
+	handle /docs* {
+		reverse_proxy 127.0.0.1:8001
+	}
+	handle /redoc* {
+		reverse_proxy 127.0.0.1:8001
+	}
+	handle /openapi.json {
+		reverse_proxy 127.0.0.1:8001
+	}
+	handle /lab* {
+		reverse_proxy 127.0.0.1:8001
+	}
+	handle /admin* {
+		reverse_proxy 127.0.0.1:8001
+	}
+	handle /static/* {
+		reverse_proxy 127.0.0.1:8001
+	}
+
+	# Arahus Studio (Next.js)
+	handle {
+		reverse_proxy 127.0.0.1:3000
+	}
+}

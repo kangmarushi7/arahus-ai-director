@@ -65,13 +65,13 @@ def create_app(*, enable_cors: bool = True) -> FastAPI:
     application.include_router(api_router)
     application.include_router(websocket_router)
 
-    # Optional: mount lab admin under /api/admin when available.
+    # Pipeline Lab + admin audit UI (secondary surfaces under /lab and /admin).
     try:
-        from src.webapp.admin import router as admin_router
+        from src.webapp.lab_mount import mount_lab
 
-        application.include_router(admin_router)
-    except Exception:  # noqa: BLE001 - admin is optional
-        pass
+        mount_lab(application)
+    except Exception:  # noqa: BLE001 - lab is optional on API-only hosts
+        logger.warning("event=lab_mount_skipped", exc_info=True)
 
     return application
 

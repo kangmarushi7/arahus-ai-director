@@ -18,3 +18,7 @@ database/*.db
 !.env.example
 tests
 reports
+studio/node_modules
+studio/.next
+**/node_modules
+**/.next
