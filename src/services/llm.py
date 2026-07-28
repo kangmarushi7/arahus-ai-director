@@ -144,6 +144,21 @@ class LLMClient:
                 self._log_progress(
                     f"LLM [{model_label}] cache hit → {response_model.__name__}"
                 )
+                from src.audit.store import record_llm_exchange
+
+                record_llm_exchange(
+                    tag=self.task,
+                    request=prompt,
+                    response=json.dumps(cached, ensure_ascii=False),
+                    model=cache_model,
+                    provider="cache",
+                    latency_ms=0.0,
+                    input_tokens=0,
+                    output_tokens=0,
+                    estimated_cost=0.0,
+                    success=True,
+                    meta={"cache_hit": True, "response_model": response_model.__name__},
+                )
                 return self._validate(cached, response_model, raw_text=json.dumps(cached))
 
         self._log_progress(

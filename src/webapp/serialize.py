@@ -47,6 +47,7 @@ def serialize_result(result: PipelineResult) -> dict[str, Any]:
     review = result.review
     return {
         "topic": result.topic,
+        "run_id": result.run_id,
         "using_stub_services": result.using_stub_services,
         "character_bible": result.character_bible,
         "domain": domain,

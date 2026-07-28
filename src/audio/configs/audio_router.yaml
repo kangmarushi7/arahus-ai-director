@@ -1,0 +1,50 @@
+# Audio router YAML — provider-agnostic.
+# Call sites never import vendor SDKs; adapters are selected by `type` only.
+
+default_provider: stub
+default_quality: production
+default_profile: production
+
+providers:
+  stub:
+    type: stub
+    enabled: true
+  runpod:
+    type: runpod
+    enabled: false
+    api_key_env: RUNPOD_API_KEY
+    endpoint_id_env: RUNPOD_AUDIO_ENDPOINT_ID
+
+models:
+  voice-placeholder:
+    provider: stub
+    model_id: voice-placeholder
+    description: Architecture placeholder for TTS / clone
+    modes: [tts, clone]
+    sample_rate: 24000
+    format: wav
+    cost_per_second: 0.0
+  music-placeholder:
+    provider: stub
+    model_id: music-placeholder
+    description: Architecture placeholder for music beds
+    modes: [music]
+    sample_rate: 44100
+    format: wav
+    cost_per_second: 0.0
+  sfx-placeholder:
+    provider: stub
+    model_id: sfx-placeholder
+    description: Architecture placeholder for SFX
+    modes: [sfx]
+    sample_rate: 44100
+    format: wav
+    cost_per_second: 0.0
+
+quality_modes:
+  preview:
+    model: voice-placeholder
+  production:
+    model: voice-placeholder
+  experimental:
+    model: voice-placeholder

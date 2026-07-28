@@ -61,6 +61,7 @@ class _FakePrompt:
         domain_info=None,
         prompt_context=None,
         character_bible: str = "",
+        project_memory=None,
     ):
         scenes = [
             Scene(

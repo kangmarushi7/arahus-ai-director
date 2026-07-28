@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass
 
 from src.database.session import get_session
+from src.models.memory import ProjectMemory
 from src.models.research import ResearchResult
 from src.repositories.character_repository import CharacterRepository
 
@@ -42,6 +43,25 @@ def profiles_from_research(research: ResearchResult) -> list[CharacterProfile]:
             appearance += f", era {research.time_period}"
         profiles.append(
             CharacterProfile(name=name, appearance=appearance, role="key_person")
+        )
+    return profiles
+
+
+def profiles_from_project_memory(
+    memory: ProjectMemory,
+) -> list[CharacterProfile]:
+    """Project CharacterBible entries into legacy CharacterProfile rows."""
+    profiles: list[CharacterProfile] = []
+    for character in memory.characters:
+        appearance = character.appearance.to_prompt_fragment() or character.notes
+        if not appearance:
+            appearance = f"consistent likeness of {character.name}"
+        profiles.append(
+            CharacterProfile(
+                name=character.name,
+                appearance=appearance,
+                role=character.role or "key_person",
+            )
         )
     return profiles
 

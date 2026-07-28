@@ -10,9 +10,18 @@ from src.agents.director import DirectorAgent
 from src.agents.prompt import PromptAgent
 from src.agents.research import ResearchAgent
 from src.agents.review import ReviewAgent
+from src.audit.store import (
+    audit_run,
+    get_current_run,
+    record_image_result,
+    record_stage_event,
+    record_video_result,
+    save_run,
+)
 from src.characters import (
     format_character_bible,
     persist_character_profiles,
+    profiles_from_project_memory,
     profiles_from_research,
 )
 from src.config import get_settings
@@ -32,8 +41,10 @@ from src.events import (
     ResearchCompleted,
     ReviewCompleted,
 )
+from src.memory import WorldBuilder
 from src.models.context import PipelineContext
 from src.models.image import ImageResult
+from src.models.memory import AssetKind, ProjectMemory
 from src.models.pipeline import GeneratedImageInfo, PipelineResult
 from src.models.research import ResearchResult
 from src.models.review import ReviewResult
@@ -126,6 +137,7 @@ class DirectorPipeline:
         max_parallel_images: int | None = None,
         event_bus: EventBus | None = None,
         using_stub_services: bool = False,
+        world_builder: WorldBuilder | None = None,
     ) -> None:
         """Wire the pipeline's dependencies.
 
@@ -147,6 +159,7 @@ class DirectorPipeline:
                 ``MAX_PARALLEL_IMAGES`` / ``IMAGE_MAX_WORKERS``, usually 4).
             event_bus: Optional in-process event bus for stage notifications.
             using_stub_services: When ``True``, image statuses reflect stub mode.
+            world_builder: Optional Character/World/Style memory builder.
         """
         settings = get_settings()
         retries = (
@@ -206,7 +219,85 @@ class DirectorPipeline:
             self._review_llm,
             debug=settings.pipeline.agent_debug,
         )
+        self._world_builder = world_builder or WorldBuilder()
         self._reporter: ProgressReporter | None = None
+        self._orchestrator: AgentOrchestrator | None = None
+
+    @property
+    def orchestrator(self) -> AgentOrchestrator:
+        """Sprint 7.0 multi-agent orchestrator bound to current agent instances.
+
+        Runners are re-bound on each access so monkeypatched agents are honored.
+        Does not alter :meth:`generate`.
+        """
+        from src.orchestration import AgentOrchestrator, wire_creative_agents
+
+        bus = self._event_bus or EventBus()
+        if self._orchestrator is None:
+            self._orchestrator = AgentOrchestrator(
+                event_bus=bus,
+                auto_approve_checkpoints=True,
+                intervention_timeout_seconds=5.0,
+            )
+        wire_creative_agents(
+            self._orchestrator,
+            research_agent=self._research_agent,
+            director_agent=self._director_agent,
+            prompt_agent=self._prompt_agent,
+            review_agent=self._review_agent,
+        )
+        return self._orchestrator
+
+    def run_orchestrated(
+        self,
+        topic: str,
+        *,
+        inputs: dict | None = None,
+        auto_approve_checkpoints: bool = True,
+        resume_run_id: str | None = None,
+        checkpoint_after_director: bool = True,
+        checkpoint_after_review: bool = True,
+    ):
+        """Execute the creative agent DAG via :class:`AgentOrchestrator`.
+
+        Persists the execution graph for replay/debugging. Does **not** replace
+        :meth:`generate` — call this when you need checkpoints, cancellation,
+        or recovery.
+
+        Args:
+            topic: Creative subject (same semantics as :meth:`generate`).
+            inputs: Extra structured inputs merged into the graph.
+            auto_approve_checkpoints: When ``True``, checkpoints resolve
+                automatically (CI / unattended). Set ``False`` for manual
+                :meth:`AgentOrchestrator.intervene` control.
+            resume_run_id: Resume a previously persisted run.
+            checkpoint_after_director: Pause after director for intervention.
+            checkpoint_after_review: Pause after review for intervention.
+        """
+        from src.orchestration import creative_workflow_specs
+
+        cleaned = " ".join(topic.split())
+        if not cleaned:
+            raise ValueError("topic must be a non-empty string")
+
+        orch = self.orchestrator
+        orch._auto_approve = auto_approve_checkpoints
+
+        if resume_run_id:
+            return orch.resume(resume_run_id)
+
+        payload = {"topic": cleaned, **(inputs or {})}
+        graph = orch.build_graph(
+            creative_workflow_specs(
+                checkpoint_after_director=checkpoint_after_director,
+                checkpoint_after_review=checkpoint_after_review,
+            ),
+            topic=cleaned,
+            name="creative_workflow",
+            inputs=payload,
+            metadata={"entry": "run_orchestrated"},
+        )
+        return orch.run(graph)
 
     def generate(
         self,
@@ -235,11 +326,29 @@ class DirectorPipeline:
             raise ValueError("topic must be a non-empty string")
 
         cleaned_topic = " ".join(topic.split())
+        with audit_run(cleaned_topic) as run:
+            result = self._generate_with_audit(
+                cleaned_topic,
+                progress_callback=progress_callback,
+                run_id=run.id,
+            )
+            return result
+
+    def _generate_with_audit(
+        self,
+        cleaned_topic: str,
+        *,
+        progress_callback: ProgressCallback | None,
+        run_id: str,
+    ) -> PipelineResult:
+        """Inner pipeline body bound to an active audit run."""
         settings = get_settings()
         monitoring_enabled = settings.monitoring.enabled
         self._reporter = ProgressReporter(callback=progress_callback)
         self._bind_step_loggers()
         self._emit(f"Pipeline started for topic: {cleaned_topic}", progress=0.01)
+        self._emit(f"Request id: {run_id}")
+        record_stage_event("pipeline", f"Started for topic: {cleaned_topic}")
         self._metrics.reset()
         profiler = PipelineProfiler(
             self._metrics,
@@ -253,6 +362,7 @@ class DirectorPipeline:
         stage_timings: dict[str, float] = {
             "domain_seconds": 0.0,
             "research_seconds": 0.0,
+            "world_seconds": 0.0,
             "director_seconds": 0.0,
             "prompt_seconds": 0.0,
             "review_seconds": 0.0,
@@ -260,6 +370,7 @@ class DirectorPipeline:
         }
         pipeline_context: PipelineContext | None = None
         character_bible = ""
+        project_memory: ProjectMemory | None = None
         run_error: str | None = None
         research: ResearchResult | None = None
         plan: DirectorPlan | None = None
@@ -323,6 +434,43 @@ class DirectorPipeline:
                     )
                 )
 
+                self._begin_stage("World Builder")
+                self._emit(
+                    "Stage 2b/6 — World Builder: Character & World Memory…",
+                    progress=0.23,
+                )
+                stage_started = time.perf_counter()
+                with profiler.measure("World Builder"):
+                    project_memory = self._world_builder.build(
+                        research,
+                        domain_info=pipeline_context.domain_info,
+                        prompt_context=pipeline_context.prompt_context,
+                        persist=True,
+                    )
+                    pipeline_context = pipeline_context.model_copy(
+                        update={
+                            "project_id": project_memory.project_id,
+                            "project_memory": project_memory,
+                        }
+                    )
+                    # Prefer structured bible text when characters were built.
+                    memory_bible = project_memory.character_bible_text()
+                    if memory_bible:
+                        character_bible = memory_bible
+                    memory_profiles = profiles_from_project_memory(project_memory)
+                    if memory_profiles:
+                        persist_character_profiles(memory_profiles)
+                stage_timings["world_seconds"] = time.perf_counter() - stage_started
+                self._complete_stage("World Builder")
+                self._emit(
+                    "World Builder complete "
+                    f"({stage_timings['world_seconds']:.1f}s) — "
+                    f"project={project_memory.project_id}, "
+                    f"characters={len(project_memory.characters)}, "
+                    f"locations={len(project_memory.world.locations)}",
+                    progress=0.24,
+                )
+
                 self._begin_stage("Director")
                 self._emit(
                     "Stage 3/6 — Director Agent: planning four scenes…",
@@ -364,6 +512,7 @@ class DirectorPipeline:
                         context=pipeline_context,
                         profiler=profiler,
                         character_bible=character_bible,
+                        project_memory=project_memory,
                     )
                 )
                 stage_timings["prompt_seconds"] = prompt_seconds
@@ -414,6 +563,28 @@ class DirectorPipeline:
                         progress=0.98,
                     )
 
+                for image in images:
+                    record_image_result(
+                        scene_id=image.scene_id,
+                        title=image.title,
+                        prompt=image.prompt,
+                        url=image.url,
+                        status=image.status,
+                    )
+                record_video_result(
+                    status="not_generated",
+                    note="Video generation is not enabled yet.",
+                )
+
+                if project_memory is not None:
+                    images = self._register_generated_image_assets(
+                        project_memory,
+                        images,
+                    )
+                    pipeline_context = pipeline_context.model_copy(
+                        update={"project_memory": project_memory}
+                    )
+
                 total = time.perf_counter() - started
                 self._emit(f"Pipeline finished in {total:.1f}s", progress=1.0)
 
@@ -437,7 +608,31 @@ class DirectorPipeline:
                     context=pipeline_context,
                     using_stub_services=self._using_stub_services,
                     character_bible=character_bible,
+                    project_id=(
+                        project_memory.project_id if project_memory is not None else ""
+                    ),
+                    project_memory=project_memory,
+                    run_id=run_id,
                 )
+                audit = get_current_run()
+                if audit is not None:
+                    audit.finish(
+                        status="completed",
+                        summary={
+                            "domain": (
+                                pipeline_context.domain_info.domain.value
+                                if pipeline_context is not None
+                                else None
+                            ),
+                            "scene_count": len(final_storyboard.scenes),
+                            "image_urls": sum(1 for item in images if item.url),
+                            "review_score": review.overall_score,
+                            "total_seconds": round(total, 3),
+                            "metrics": result.metrics,
+                        },
+                    )
+                    save_run(audit)
+                    self._maybe_sync_audit_to_db(audit.to_dict())
                 self._maybe_persist_result(result)
         except Exception as exc:
             run_error = f"{type(exc).__name__}: {exc}"
@@ -484,7 +679,29 @@ class DirectorPipeline:
             context=pipeline_context,
             using_stub_services=self._using_stub_services,
             character_bible=character_bible,
+            project_id=(
+                project_memory.project_id if project_memory is not None else ""
+            ),
+            project_memory=project_memory,
+            run_id=run_id,
         )
+
+    def _maybe_sync_audit_to_db(self, payload: dict) -> None:
+        """Best-effort upsert of the audit document into Postgres."""
+        settings = get_settings()
+        db_url = settings.database.url.get_secret_value().strip()
+        if not settings.pipeline.persist_pipeline_runs or not db_url:
+            return
+        try:
+            from src.audit.db import sync_run_payload
+
+            sync_run_payload(payload)
+        except Exception as exc:  # noqa: BLE001 - audit DB sync is best-effort
+            self.logger.warning(
+                "event=audit_db_sync_skipped run_id=%r error=%s",
+                payload.get("id"),
+                exc,
+            )
 
     def _maybe_persist_result(self, result: PipelineResult) -> None:
         """Persist pipeline artifacts when configured and DATABASE_URL is set."""
@@ -502,6 +719,37 @@ class DirectorPipeline:
                 result.topic,
                 exc,
             )
+
+    def _register_generated_image_assets(
+        self,
+        memory: ProjectMemory,
+        images: list[GeneratedImageInfo],
+    ) -> list[GeneratedImageInfo]:
+        """Assign stable asset IDs to generated images and persist memory."""
+        registry = memory.registry
+        if registry is None:
+            return images
+        updated: list[GeneratedImageInfo] = []
+        for image in images:
+            slug = f"scene_{image.scene_id}_image"
+            refs = {"url": image.url} if image.url else {}
+            record = registry.register(
+                kind=AssetKind.IMAGE,
+                slug=slug,
+                label=image.title or f"Scene {image.scene_id}",
+                refs=refs,
+                metadata={"scene_id": image.scene_id, "status": image.status},
+            )
+            updated.append(image.model_copy(update={"asset_id": record.id}))
+        try:
+            self._world_builder.store.save(memory)
+        except Exception as exc:  # noqa: BLE001 - best-effort
+            self.logger.warning(
+                "event=image_asset_persist_skipped project_id=%r error=%s",
+                memory.project_id,
+                exc,
+            )
+        return updated
 
     def _publish(self, event: Event) -> None:
         """Publish ``event`` when an event bus is configured."""
@@ -607,6 +855,7 @@ class DirectorPipeline:
         context: PipelineContext,
         profiler: PipelineProfiler,
         character_bible: str = "",
+        project_memory: ProjectMemory | None = None,
     ) -> tuple[Storyboard, ReviewResult, float, float]:
         """Generate and review storyboards until one passes or retries expire.
 
@@ -645,6 +894,7 @@ class DirectorPipeline:
                     domain_info=context.domain_info,
                     prompt_context=context.prompt_context,
                     character_bible=character_bible,
+                    project_memory=project_memory or context.project_memory,
                 )
                 if optimizer is not None:
                     storyboard = self._optimize_storyboard_prompts(

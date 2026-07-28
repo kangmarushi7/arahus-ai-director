@@ -131,6 +131,20 @@ class LLMRouter:
                 retries=retry_state.retries,
                 success=False,
             )
+            _record_audit_exchange(
+                task=route.task,
+                messages=normalized,
+                response_text=None,
+                provider=provider_name,
+                model=model_name,
+                latency_ms=latency_ms,
+                input_tokens=0,
+                output_tokens=0,
+                estimated_cost=0.0,
+                success=False,
+                error=str(exc),
+                meta={"retries": retry_state.retries},
+            )
             logger.error(
                 "event=llm_request_failed task=%s provider=%s model=%s "
                 "latency_ms=%.1f retries=%s error=%s",
@@ -172,6 +186,22 @@ class LLMRouter:
             estimated_cost=response.estimated_cost,
             retries=retry_state.retries,
             success=True,
+        )
+        _record_audit_exchange(
+            task=response.task or route.task,
+            messages=normalized,
+            response_text=response.text,
+            provider=response.provider,
+            model=response.model,
+            latency_ms=response.latency_ms,
+            input_tokens=response.input_tokens,
+            output_tokens=response.output_tokens,
+            estimated_cost=response.estimated_cost,
+            success=True,
+            meta={
+                "retries": retry_state.retries,
+                "finish_reason": response.finish_reason,
+            },
         )
         logger.info(
             "event=llm_request_complete task=%s provider=%s model=%s "
@@ -226,6 +256,41 @@ def _record_cost_tracker_call(
         estimated_cost=estimated_cost,
         retries=retries,
         success=success,
+    )
+
+
+def _record_audit_exchange(
+    *,
+    task: str,
+    messages: Sequence[Any],
+    response_text: str | None,
+    provider: str,
+    model: str,
+    latency_ms: float,
+    input_tokens: int,
+    output_tokens: int,
+    estimated_cost: float,
+    success: bool,
+    error: str | None = None,
+    meta: Mapping[str, Any] | None = None,
+) -> None:
+    """Append request/response text to the bound pipeline audit run, if any."""
+    # Lazy import avoids a circular dependency: llm.router ↔ audit.
+    from src.audit.store import messages_to_prompt_text, record_llm_exchange
+
+    record_llm_exchange(
+        tag=task,
+        request=messages_to_prompt_text(messages),
+        response=response_text,
+        model=model,
+        provider=provider,
+        latency_ms=latency_ms,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        estimated_cost=estimated_cost,
+        success=success,
+        error=error,
+        meta=dict(meta or {}),
     )
 
 

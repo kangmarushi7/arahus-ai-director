@@ -22,6 +22,7 @@ from src.models.context import PipelineContext
 from src.models.image import ImageResult
 from src.models.research import ResearchResult
 from src.models.review import ReviewResult
+from src.models.scene_plan import ScenePlan, StoryPlan
 from src.models.storyboard import DirectorPlan, Scene, Storyboard
 from src.pipeline import DirectorPipeline
 from src.prompt import PromptComposer
@@ -91,6 +92,37 @@ def _sample_plan(topic: str) -> DirectorPlan:
             Scene(id=2, title="Two", description="Second scene description " * 8),
             Scene(id=3, title="Three", description="Third scene description " * 8),
             Scene(id=4, title="Four", description="Fourth scene description " * 8),
+        ],
+    )
+
+
+def _sample_story_plan(topic: str) -> StoryPlan:
+    """Director AI v2 cinematic plan used by StoryPlanner / DirectorAgent."""
+    titles = ("One", "Two", "Three", "Four")
+    return StoryPlan(
+        topic=topic,
+        scenes=[
+            ScenePlan(
+                id=i,
+                title=title,
+                description=f"{title} scene description with enough words " * 6,
+                subject=f"primary subject {word}",
+                environment=f"environment {word}",
+                action=f"action {word}",
+                camera_shot="medium wide",
+                camera_movement="static",
+                camera_angle="eye-level",
+                lens="35mm",
+                lighting="motivated practical light",
+                composition="balanced frame",
+                emotion="focused intensity",
+                continuity=f"continues beat {i}",
+                negative_prompt="blurry, watermark",
+            )
+            for i, (title, word) in enumerate(
+                zip(titles, ("one", "two", "three", "four"), strict=True),
+                start=1,
+            )
         ],
     )
 
@@ -179,13 +211,15 @@ def test_pipeline_domain_topics(
 
     research = _sample_research(topic)
     plan = _sample_plan(topic)
+    story_plan = _sample_story_plan(topic)
     content = _sample_content(topic)
     review = _sample_review()
 
     llm = _FakeLLM(
         {
             ResearchResult: research,
-            DirectorPlan: plan,
+            StoryPlan: story_plan,
+            DirectorPlan: plan,  # legacy fallback if ever requested
             SceneContentPlan: content,
             ReviewResult: review,
         }
@@ -213,14 +247,15 @@ def test_pipeline_domain_topics(
     assert isinstance(result.context, PipelineContext)
     assert result.context.domain_info.domain == expected_domain
 
-    # Domain YAML style/camera must appear in composed prompts.
+    # Domain YAML style must appear; ScenePlan camera/lighting override domain camera.
     style_token = result.prompt_context.style.split(",")[0].strip()
-    camera_token = result.prompt_context.camera.split(",")[0].strip()
     for scene in result.storyboard.scenes:
         assert scene.image_prompt
         assert "primary subject" in scene.image_prompt
+        # ScenePlan cinematic fields must survive PromptComposer.
+        assert "medium wide" in scene.image_prompt
+        assert "motivated practical light" in scene.image_prompt
         assert style_token in scene.image_prompt
-        assert camera_token in scene.image_prompt
 
     assert result.metrics.get("domain_seconds", 0) >= 0
     assert result.using_stub_services is False

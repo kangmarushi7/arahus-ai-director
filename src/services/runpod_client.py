@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "https://api.runpod.ai/v2"
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 30.0
-DEFAULT_POLL_INTERVAL_SECONDS = 2.0
+DEFAULT_POLL_INTERVAL_SECONDS = 1.5
 DEFAULT_POLL_TIMEOUT_SECONDS = 600.0
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_RETRY_BACKOFF_SECONDS = 1.0
@@ -110,6 +110,7 @@ class RunPodClient:
         height: int = 1024,
         num_inference_steps: int = 28,
         guidance_scale: float = 3.5,
+        model_id: str = "black-forest-labs/FLUX.1-dev",
         request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
         poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
         poll_timeout_seconds: float = DEFAULT_POLL_TIMEOUT_SECONDS,
@@ -127,6 +128,7 @@ class RunPodClient:
             height: Default generation height forwarded to the FLUX worker.
             num_inference_steps: Denoising steps forwarded to the FLUX worker.
             guidance_scale: CFG scale forwarded to the FLUX worker.
+            model_id: Hugging Face / worker model id (FLUX.1-dev by default).
             request_timeout_seconds: Per-request socket timeout for submit/status.
             poll_interval_seconds: Delay between status polls.
             poll_timeout_seconds: Maximum wall time spent waiting for a job.
@@ -167,6 +169,7 @@ class RunPodClient:
         self.height = int(height)
         self.num_inference_steps = int(num_inference_steps)
         self.guidance_scale = float(guidance_scale)
+        self.model_id = (model_id or "black-forest-labs/FLUX.1-dev").strip()
         self.request_timeout_seconds = float(request_timeout_seconds)
         self.poll_interval_seconds = float(poll_interval_seconds)
         self.poll_timeout_seconds = float(poll_timeout_seconds)
@@ -215,6 +218,7 @@ class RunPodClient:
             height=image.height,
             num_inference_steps=image.num_inference_steps,
             guidance_scale=image.guidance_scale,
+            model_id=image.model_id,
             request_timeout_seconds=request_timeout_seconds,
             poll_interval_seconds=poll_interval_seconds,
             poll_timeout_seconds=poll_timeout_seconds,
@@ -267,6 +271,7 @@ class RunPodClient:
         payload = {
             "input": {
                 "prompt": cleaned,
+                "model_id": self.model_id,
                 "num_images": 1,
                 "width": self.width,
                 "height": self.height,
@@ -275,9 +280,10 @@ class RunPodClient:
             }
         }
         logger.info(
-            "event=runpod_submit endpoint_id=%s prompt_chars=%s "
+            "event=runpod_submit endpoint_id=%s model_id=%s prompt_chars=%s "
             "size=%sx%s steps=%s guidance=%s",
             self.endpoint_id,
+            self.model_id,
             len(cleaned),
             self.width,
             self.height,

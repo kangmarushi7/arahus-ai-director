@@ -1,0 +1,72 @@
+@import "tailwindcss";
+
+:root {
+  --background: #eef1f4;
+  --foreground: #141820;
+  --muted: #d8dee6;
+  --muted-foreground: #5a6573;
+  --card: #f7f8fa;
+  --card-foreground: #141820;
+  --border: #c9d1db;
+  --accent: #1a6b7a;
+  --accent-foreground: #f4fbfc;
+  --accent-soft: #d4eef2;
+  --warning: #b86a1c;
+  --success: #1f7a4d;
+  --danger: #b42318;
+  --sidebar: #e4e9ef;
+  --sidebar-foreground: #1c2430;
+  --ring: #1a6b7a;
+  --radius: 0.75rem;
+  --surface-glow: radial-gradient(
+    120% 80% at 10% -10%,
+    rgba(26, 107, 122, 0.12),
+    transparent 55%
+  );
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-border: var(--border);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent-soft: var(--accent-soft);
+  --color-warning: var(--warning);
+  --color-success: var(--success);
+  --color-danger: var(--danger);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-ring: var(--ring);
+  --font-sans: var(--font-figtree);
+  --font-display: var(--font-newsreader);
+  --radius-lg: var(--radius);
+}
+
+* {
+  border-color: var(--border);
+}
+
+body {
+  background: var(--background);
+  background-image: var(--surface-glow);
+  background-attachment: fixed;
+  color: var(--foreground);
+  font-family: var(--font-figtree), system-ui, sans-serif;
+  min-height: 100vh;
+}
+
+h1,
+h2,
+.font-display {
+  font-family: var(--font-newsreader), Georgia, serif;
+  letter-spacing: -0.02em;
+}
+
+::selection {
+  background: color-mix(in oklab, var(--accent) 28%, white);
+}

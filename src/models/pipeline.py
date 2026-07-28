@@ -10,6 +10,7 @@ from src.domain.models import DomainInfo
 from src.domain.prompt_context import DomainPromptContext
 from src.models.base import StrictModel
 from src.models.context import PipelineContext
+from src.models.memory import ProjectMemory
 from src.models.research import ResearchResult
 from src.models.review import ReviewResult
 from src.models.storyboard import DirectorPlan, Storyboard
@@ -23,6 +24,7 @@ class GeneratedImageInfo(StrictModel):
     prompt: str = ""
     url: str | None = None
     status: str = "ok"
+    asset_id: int | None = Field(default=None, ge=1)
 
 
 class PipelineResult(StrictModel):
@@ -40,3 +42,6 @@ class PipelineResult(StrictModel):
     context: PipelineContext | None = None
     using_stub_services: bool = False
     character_bible: str = ""
+    project_id: str = ""
+    project_memory: ProjectMemory | None = None
+    run_id: str | None = None

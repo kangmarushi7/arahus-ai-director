@@ -1,0 +1,8 @@
+# cinematic — longer, smoother motion
+duration: 8
+fps: 24
+width: 1280
+height: 720
+aspect_ratio: "16:9"
+quality: high
+motion: smooth

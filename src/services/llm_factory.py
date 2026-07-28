@@ -44,17 +44,20 @@ def create_llm(
 
 
 def create_task_llm(task: str, *, llm: LLM | None = None) -> LLMClient:
-    """Build a client for ``task`` with env→YAML model precedence.
+    """Build a client for ``task`` with admin→env→YAML model precedence.
 
     Precedence:
-        1. Non-empty env override for the task (``RESEARCH_MODEL``, …)
-        2. ``router.yaml`` task route model (empty ``LLMClient.model``)
+        1. Admin panel override (``artifacts/admin/model_overrides.json``)
+        2. Non-empty env override for the task (``RESEARCH_MODEL``, …)
+        3. ``router.yaml`` task route model (empty ``LLMClient.model``)
     """
     if not task.strip():
         raise ValueError("task must be a non-empty string")
+    from src.llm.model_overrides import get_admin_model_override
+
     settings = get_settings().llm
     resolved = task.strip().lower()
-    override = settings.model_override_for(resolved)
+    override = get_admin_model_override(resolved) or settings.model_override_for(resolved)
     return LLMClient(
         api_key=settings.api_key.get_secret_value(),
         base_url=settings.base_url,

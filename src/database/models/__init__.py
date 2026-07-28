@@ -22,6 +22,12 @@ from src.database.models.character import Character
 from src.database.models.character_alias import CharacterAlias
 from src.database.models.character_reference_image import CharacterReferenceImage
 from src.database.models.image import Image, ImageStatus
+from src.database.models.pipeline_run import (
+    PipelineLogEntry,
+    PipelineLogKind,
+    PipelineRun,
+    PipelineRunStatus,
+)
 from src.database.models.project import Project, ProjectStatus
 from src.database.models.prompt_version import PromptVersion, PromptVersionStatus
 from src.database.models.scene import Scene, SceneStatus
@@ -34,6 +40,10 @@ __all__ = [
     "CharacterReferenceImage",
     "Image",
     "ImageStatus",
+    "PipelineLogEntry",
+    "PipelineLogKind",
+    "PipelineRun",
+    "PipelineRunStatus",
     "Project",
     "ProjectStatus",
     "PromptVersion",

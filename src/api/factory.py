@@ -1,4 +1,7 @@
-"""Composition root: build a configured pipeline from environment variables."""
+"""Composition root: build a configured pipeline from environment variables.
+
+Preserves the historical ``src.api`` public helpers used by scripts and the lab.
+"""
 
 from __future__ import annotations
 
@@ -10,11 +13,11 @@ from src.models.image import ImageResult
 from src.models.pipeline import PipelineResult
 from src.models.storyboard import Storyboard
 from src.pipeline import DirectorPipeline, ImageGenerator, StorageClient
+from src.playground.prompt_playground import PromptPlayground
 from src.progress import ProgressCallback
 from src.services.r2 import R2StorageClient
 from src.services.runpod import RunPodImageGenerator
 from src.services.runpod_client import RunPodClient
-from src.playground.prompt_playground import PromptPlayground
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +47,7 @@ class StubStorageClient:
 
 
 def _build_image_services() -> tuple[ImageGenerator, StorageClient, bool]:
-    """Prefer real RunPod/R2 clients; fall back to stubs only when allowed."""
+    """Prefer the Sprint 5.0 image engine; fall back to stubs when allowed."""
     settings = get_settings()
     allow_stubs = settings.pipeline.allow_stub_services
     using_stubs = False
@@ -62,11 +65,7 @@ def _build_image_services() -> tuple[ImageGenerator, StorageClient, bool]:
         using_stubs = True
 
     try:
-        runpod_client = RunPodClient.from_config(settings.image)
-        image_generator: ImageGenerator = RunPodImageGenerator(
-            runpod_client=runpod_client,
-            storage_client=storage_client,
-        )
+        settings.image.require_credentials()
     except RuntimeError as exc:
         if not allow_stubs:
             raise RuntimeError(
@@ -74,8 +73,23 @@ def _build_image_services() -> tuple[ImageGenerator, StorageClient, bool]:
                 "Set RUNPOD_* env vars or ALLOW_STUB_SERVICES=true for local dry-runs."
             ) from exc
         logger.warning("Using stub image generator: %s", exc)
-        image_generator = StubImageGenerator()
-        using_stubs = True
+        return StubImageGenerator(), storage_client, True
+
+    try:
+        from src.image import ImageEngineAdapter, ImageRouter
+
+        router = ImageRouter.from_yaml(storage_client=storage_client)
+        image_generator: ImageGenerator = ImageEngineAdapter(router)
+    except Exception as exc:  # noqa: BLE001 - keep pipeline bootable
+        logger.warning(
+            "ImageRouter unavailable (%s); falling back to RunPodImageGenerator",
+            exc,
+        )
+        runpod_client = RunPodClient.from_config(settings.image)
+        image_generator = RunPodImageGenerator(
+            runpod_client=runpod_client,
+            storage_client=storage_client,
+        )
 
     return image_generator, storage_client, using_stubs
 
@@ -123,4 +137,11 @@ def build_prompt_playground() -> PromptPlayground:
 
 def playground_image_model() -> str:
     """Return the configured image model id for prompt-version labels."""
-    return get_settings().image.model_id
+    try:
+        from src.image.config import load_image_config
+
+        cfg = load_image_config()
+        route = cfg.quality_route(cfg.default_quality)
+        return cfg.model_for(route.model).model_id
+    except Exception:  # noqa: BLE001
+        return get_settings().image.model_id

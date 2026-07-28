@@ -21,7 +21,7 @@ from src.monitoring.context import submit_in_pipeline_context
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MAX_PARALLEL_IMAGES = 4
+DEFAULT_MAX_PARALLEL_IMAGES = 6
 DEFAULT_IMAGE_RETRIES = 1
 
 

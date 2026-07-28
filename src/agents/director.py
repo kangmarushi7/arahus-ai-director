@@ -1,86 +1,37 @@
-"""Director agent: turns research into a validated scene plan."""
+"""Director agent: cinematic planning via StoryPlanner (Director AI v2).
+
+Public :meth:`DirectorAgent.run` still returns :class:`DirectorPlan` for
+pipeline backward compatibility. Internally it uses :class:`StoryPlanner`
+to produce structured :class:`~src.models.scene_plan.ScenePlan` rows.
+"""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
 from src.agents.base import BaseAgent
+from src.director.planner import (
+    SCENE_COUNT,
+    StoryPlanner,
+    StoryPlannerError,
+    generate_story_planner_prompt,
+    validate_story_plan,
+)
 from src.domain.models import DomainInfo
 from src.models.research import ResearchResult
+from src.models.scene_plan import StoryPlan
 from src.models.storyboard import DirectorPlan
 from src.services.llm import LLMClientError
 
 if TYPE_CHECKING:
     from src.services.llm import LLMClient
 
-SCENE_COUNT = 4
+# Re-export legacy names used by tests / callers.
 MIN_WORDS_PER_SCENE = 60
 MAX_WORDS_PER_SCENE = 120
 
-DIRECTOR_PROMPT_TEMPLATE = """You are an award-winning film director renowned for \
-meticulously researched, visually striking cinema across many content domains.
-
-Topic: {topic}
-{domain_block}
-Verified research (treat as authoritative context — do not invent beyond it):
-{research_block}
-
-Create exactly {scene_count} scenes that depict this topic.
-
-Rules:
-1. Structure the scene sequence to fit the detected domain's storytelling needs \
-(use DomainInfo reasoning and keywords as guidance — do not ignore the domain).
-2. Generate exactly {scene_count} scenes — no more, no fewer.
-3. Do not hallucinate people, places, objects, or events that conflict with the \
-verified research. Prefer omission over invention.
-4. Do not create duplicate or near-duplicate scenes. Each scene must advance \
-the story to a distinct moment.
-5. Each scene must include a concise "title" and a visual "description".
-6. Focus entirely on visual storytelling. Describe only what should appear in \
-the image.
-7. Do not write narration, dialogue, voice-over, on-screen titles, or backstory.
-8. Do not include camera instructions unless a specific shot choice is essential \
-to the meaning of the scene.
-9. Ground clothing, architecture, props, lighting, and atmosphere in the research \
-and domain context.
-10. Each scene description must be between {min_words} and {max_words} words.
-11. Number scenes with contiguous ids 1..{scene_count} in presentation order.
-
-Return ONLY valid JSON.
-
-Use exactly this schema:
-
-{{
-  "topic": "{topic}",
-  "scenes": [
-    {{
-      "id": 1,
-      "title": "...",
-      "description": "..."
-    }},
-    {{
-      "id": 2,
-      "title": "...",
-      "description": "..."
-    }},
-    {{
-      "id": 3,
-      "title": "...",
-      "description": "..."
-    }},
-    {{
-      "id": 4,
-      "title": "...",
-      "description": "..."
-    }}
-  ]
-}}
-
-Return no markdown.
-
-Return no explanation.
-
-Return only JSON."""
+# Backward-compatible alias: older tests import generate_director_prompt.
+generate_director_prompt = generate_story_planner_prompt
 
 
 class DirectorAgentError(Exception):
@@ -89,84 +40,6 @@ class DirectorAgentError(Exception):
     def __init__(self, message: str, *, topic: str | None = None) -> None:
         super().__init__(message)
         self.topic = topic
-
-
-def _format_research_block(research: ResearchResult) -> str:
-    """Render verified research as context for the director prompt."""
-    sections = {
-        "Topic": research.topic,
-        "Time period": research.time_period,
-        "Location": research.location,
-        "Key people": ", ".join(research.key_people),
-        "Key locations": ", ".join(research.key_locations),
-        "Architecture": ", ".join(research.architecture),
-        "Weapons": ", ".join(research.weapons),
-        "Clothing": ", ".join(research.clothing),
-        "Important events": ", ".join(research.important_events),
-        "Visual details": ", ".join(research.visual_details),
-        "Historical notes": ", ".join(research.historical_notes),
-    }
-    lines = [f"- {label}: {value}" for label, value in sections.items() if value]
-    if not lines:
-        return "- (no additional structured research fields were provided)"
-    return "\n".join(lines)
-
-
-def _format_domain_block(domain_info: DomainInfo | None) -> str:
-    if domain_info is None:
-        return ""
-    keywords = ", ".join(domain_info.keywords) if domain_info.keywords else "(none)"
-    return (
-        "\nDetected DomainInfo (adjust scene planning to this domain; do not hardcode "
-        "a single genre):\n"
-        f"- domain: {domain_info.domain.value}\n"
-        f"- confidence: {domain_info.confidence:.3f}\n"
-        f"- reasoning: {domain_info.reasoning}\n"
-        f"- keywords: {keywords}\n"
-        f"- suggested_style: {domain_info.suggested_style or '(none)'}\n"
-        f"- suggested_camera: {domain_info.suggested_camera or '(none)'}\n"
-    )
-
-
-def generate_director_prompt(
-    topic: str,
-    research: ResearchResult,
-    domain_info: DomainInfo | None = None,
-    character_bible: str = "",
-) -> str:
-    """Build the director prompt for a topic.
-
-    Args:
-        topic: Subject or event.
-        research: Verified research used as authoritative scene context.
-        domain_info: Optional domain classification guiding scene structure.
-        character_bible: Optional character-consistency block appended when set.
-
-    Returns:
-        The prompt string to send to an LLM.
-
-    Raises:
-        ValueError: If ``topic`` is empty or ``research`` is not a ResearchResult.
-    """
-    if not isinstance(topic, str) or not topic.strip():
-        raise ValueError("topic must be a non-empty string")
-    if not isinstance(research, ResearchResult):
-        raise ValueError("research must be a ResearchResult instance")
-    if domain_info is not None and not isinstance(domain_info, DomainInfo):
-        raise ValueError("domain_info must be a DomainInfo instance when provided")
-
-    prompt = DIRECTOR_PROMPT_TEMPLATE.format(
-        topic=" ".join(topic.split()),
-        domain_block=_format_domain_block(domain_info),
-        research_block=_format_research_block(research),
-        scene_count=SCENE_COUNT,
-        min_words=MIN_WORDS_PER_SCENE,
-        max_words=MAX_WORDS_PER_SCENE,
-    )
-    bible = character_bible.strip()
-    if bible:
-        prompt = f"{prompt}\n\n{bible}\n"
-    return prompt
 
 
 def _validate_plan(plan: DirectorPlan, *, topic: str) -> DirectorPlan:
@@ -205,38 +78,47 @@ def _validate_plan(plan: DirectorPlan, *, topic: str) -> DirectorPlan:
             )
         titles.append(normalized_title)
 
+    if plan.scene_plans:
+        try:
+            validate_story_plan(
+                StoryPlan(topic=plan.topic, scenes=list(plan.scene_plans)),
+                topic=topic,
+            )
+        except StoryPlannerError as exc:
+            raise DirectorAgentError(str(exc), topic=topic) from exc
+
     return plan
 
 
 class DirectorAgent(BaseAgent[DirectorPlan]):
-    """Produces a validated :class:`DirectorPlan` from a topic and research.
+    """Produces a validated :class:`DirectorPlan` with cinematic ScenePlans.
 
-    Depends only on an injected :class:`~src.services.llm.LLMClient`. Provider
-    details stay outside this class.
+    Depends on an injected :class:`~src.services.llm.LLMClient`. Planning is
+    delegated to :class:`~src.director.planner.StoryPlanner`.
     """
 
     def __init__(
         self,
         llm_client: LLMClient,
         *,
+        story_planner: StoryPlanner | None = None,
         max_retries: int = 3,
         retry_backoff_seconds: float = 1.0,
         debug: bool | None = None,
     ) -> None:
-        """Store the injected LLM client.
-
-        Args:
-            llm_client: Client used to request validated JSON.
-            max_retries: Forwarded to :class:`BaseAgent`.
-            retry_backoff_seconds: Forwarded to :class:`BaseAgent`.
-            debug: Forwarded to :class:`BaseAgent`.
-        """
+        """Store the injected LLM client and optional StoryPlanner."""
         super().__init__(
             max_retries=max_retries,
             retry_backoff_seconds=retry_backoff_seconds,
             debug=debug,
         )
         self._llm_client = llm_client
+        self._planner = story_planner or StoryPlanner(llm_client)
+
+    @property
+    def planner(self) -> StoryPlanner:
+        """Underlying cinematic :class:`StoryPlanner`."""
+        return self._planner
 
     def run(
         self,
@@ -245,13 +127,12 @@ class DirectorAgent(BaseAgent[DirectorPlan]):
         domain_info: DomainInfo | None = None,
         character_bible: str = "",
     ) -> DirectorPlan:
-        """Plan exactly four scenes for ``topic``.
+        """Plan exactly four cinematic scenes for ``topic``.
 
         Workflow:
-            1. Build a director prompt embedding ``research`` and optional domain.
-            2. Call ``llm_client.generate_json(..., DirectorPlan)``.
-            3. Validate the result (four scenes, titles, no duplicates).
-            4. Return the :class:`DirectorPlan` model.
+            1. :class:`StoryPlanner` produces a :class:`StoryPlan` of ScenePlans.
+            2. Convert to :class:`DirectorPlan` (BC ``scenes`` + ``scene_plans``).
+            3. Validate and return.
 
         Args:
             topic: Subject or event.
@@ -260,11 +141,11 @@ class DirectorAgent(BaseAgent[DirectorPlan]):
             character_bible: Optional character-consistency block for the prompt.
 
         Returns:
-            The validated director plan.
+            The validated director plan (with ``scene_plans`` when available).
 
         Raises:
             ValueError: If ``topic`` or ``research`` is invalid.
-            DirectorAgentError: If the LLM call or plan validation fails.
+            DirectorAgentError: If planning or validation fails.
         """
         if not isinstance(topic, str) or not topic.strip():
             raise ValueError("topic must be a non-empty string")
@@ -276,36 +157,36 @@ class DirectorAgent(BaseAgent[DirectorPlan]):
         cleaned_topic = " ".join(topic.split())
         self.logger.info(
             "event=director_start agent=DirectorAgent topic=%r "
-            "research_topic=%r domain=%s",
+            "research_topic=%r domain=%s mode=story_planner_v2",
             cleaned_topic,
             research.topic,
             domain_info.domain.value if domain_info else None,
         )
 
-        self._log_progress(f"Building director prompt for {cleaned_topic!r}")
-        prompt = generate_director_prompt(
-            cleaned_topic,
-            research,
-            domain_info,
-            character_bible=character_bible,
-        )
-        self._log_progress(f"Director prompt ready ({len(prompt)} chars)")
-        if self.debug:
-            self.logger.debug(
-                "event=director_prompt_built agent=DirectorAgent "
-                "topic=%r prompt_chars=%s",
-                cleaned_topic,
-                len(prompt),
-            )
-
+        self._log_progress(f"Building cinematic story plan for {cleaned_topic!r}")
         try:
-            self._log_progress("Calling director LLM…")
-            plan = self._execute(
-                lambda: self._llm_client.generate_json(prompt, DirectorPlan),
+            self._log_progress("Calling StoryPlanner…")
+            story_plan = self._execute(
+                lambda: self._planner.plan(
+                    cleaned_topic,
+                    research,
+                    domain_info,
+                    character_bible=character_bible,
+                ),
                 topic=cleaned_topic,
                 research=research,
                 domain_info=domain_info,
             )
+        except StoryPlannerError as exc:
+            self.logger.error(
+                "event=director_failed agent=DirectorAgent topic=%r error=%s",
+                cleaned_topic,
+                exc,
+            )
+            raise DirectorAgentError(
+                f"Failed to direct topic {cleaned_topic!r}: {exc}",
+                topic=cleaned_topic,
+            ) from exc
         except LLMClientError as exc:
             self.logger.error(
                 "event=director_failed agent=DirectorAgent topic=%r error=%s",
@@ -326,17 +207,20 @@ class DirectorAgent(BaseAgent[DirectorPlan]):
                 topic=cleaned_topic,
             ) from exc
 
-        if not isinstance(plan, DirectorPlan):
+        if not isinstance(story_plan, StoryPlan):
             raise DirectorAgentError(
-                "LLM client returned a non-DirectorPlan value "
-                f"({type(plan).__name__})",
+                "StoryPlanner returned a non-StoryPlan value "
+                f"({type(story_plan).__name__})",
                 topic=cleaned_topic,
             )
 
+        plan = story_plan.to_director_plan()
         validated = _validate_plan(plan, topic=cleaned_topic)
         self.logger.info(
-            "event=director_complete agent=DirectorAgent topic=%r scenes=%s",
+            "event=director_complete agent=DirectorAgent topic=%r scenes=%s "
+            "scene_plans=%s",
             validated.topic,
             len(validated.scenes),
+            len(validated.scene_plans or []),
         )
         return validated

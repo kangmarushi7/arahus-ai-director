@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 PIPELINE_STAGES: tuple[str, ...] = (
     "Domain",
     "Research",
+    "World Builder",
     "Director",
     "Prompt",
     "Review",

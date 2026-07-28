@@ -1,0 +1,8 @@
+# production — default shipping quality
+duration: 5
+fps: 24
+width: 720
+height: 1280
+aspect_ratio: "9:16"
+quality: high
+motion: natural

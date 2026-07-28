@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from src.config import reload_settings
 from src.pipeline import PipelineValidationError
 from src.progress import ProgressUpdate
+from src.webapp.admin import router as admin_router
 from src.webapp.serialize import config_status_payload, serialize_result
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,7 @@ app = FastAPI(
     description="Simple end-to-end pipeline test console",
     version="1.0.0",
 )
+app.include_router(admin_router)
 
 if (WEB_ROOT / "static").is_dir():
     app.mount("/static", StaticFiles(directory=str(WEB_ROOT / "static")), name="static")
@@ -61,6 +63,15 @@ def index() -> FileResponse:
     return FileResponse(index_path)
 
 
+@app.get("/admin")
+def admin_index() -> FileResponse:
+    """Serve the pipeline audit admin UI."""
+    admin_path = WEB_ROOT / "admin.html"
+    if not admin_path.is_file():
+        raise HTTPException(status_code=404, detail="web/admin.html missing")
+    return FileResponse(admin_path)
+
+
 @app.post("/api/run")
 async def run_pipeline(body: RunRequest) -> StreamingResponse:
     """Run the pipeline and stream progress events (NDJSON over SSE)."""
@@ -85,6 +96,7 @@ async def run_pipeline(body: RunRequest) -> StreamingResponse:
 
     queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
     loop = asyncio.get_running_loop()
+    run_id_box: dict[str, str | None] = {"id": None}
 
     def on_progress(update: ProgressUpdate) -> None:
         payload = {
@@ -93,6 +105,7 @@ async def run_pipeline(body: RunRequest) -> StreamingResponse:
             "fraction": update.fraction,
             "stages": dict(update.stages),
             "stage_panel": update.stage_panel,
+            "run_id": run_id_box["id"],
         }
         loop.call_soon_threadsafe(queue.put_nowait, payload)
 
@@ -102,9 +115,14 @@ async def run_pipeline(body: RunRequest) -> StreamingResponse:
             from src.api import generate_pipeline_result
 
             result = generate_pipeline_result(topic, progress_callback=on_progress)
+            run_id_box["id"] = result.run_id
             loop.call_soon_threadsafe(
                 queue.put_nowait,
-                {"type": "result", "result": serialize_result(result)},
+                {
+                    "type": "result",
+                    "result": serialize_result(result),
+                    "run_id": result.run_id,
+                },
             )
         except PipelineValidationError as exc:
             loop.call_soon_threadsafe(
@@ -115,6 +133,7 @@ async def run_pipeline(body: RunRequest) -> StreamingResponse:
                         "type": "PipelineValidationError",
                         "message": str(exc),
                     },
+                    "run_id": run_id_box["id"],
                 },
             )
         except Exception as exc:  # noqa: BLE001 - surface to client
@@ -128,6 +147,7 @@ async def run_pipeline(body: RunRequest) -> StreamingResponse:
                         "message": str(exc),
                         "traceback": traceback.format_exc(),
                     },
+                    "run_id": run_id_box["id"],
                 },
             )
         finally:
@@ -141,8 +161,12 @@ async def run_pipeline(body: RunRequest) -> StreamingResponse:
                 item = await queue.get()
                 if item is None:
                     break
+                message = str(item.get("message") or "")
+                if message.startswith("Request id: ") and run_id_box["id"] is None:
+                    run_id_box["id"] = message.removeprefix("Request id: ").strip()
+                    yield _sse({"type": "run_id", "run_id": run_id_box["id"]})
                 yield _sse(item)
-            yield _sse({"type": "done"})
+            yield _sse({"type": "done", "run_id": run_id_box["id"]})
         finally:
             await task
 

@@ -12,6 +12,7 @@ from src.domain.config_loader import ConfigLoader
 from src.domain.models import DomainInfo, DomainType
 from src.domain.prompt_context import DomainPromptContext
 from src.models.base import StrictModel
+from src.models.memory import ProjectMemory
 from src.models.research import ResearchResult
 from src.models.storyboard import DirectorPlan, Scene, Storyboard
 from src.prompt.composer import PromptComposer
@@ -280,6 +281,7 @@ class PromptAgent(BaseAgent[Storyboard]):
         self._llm_client = llm_client
         self._composer = prompt_composer or PromptComposer()
         self._config_loader = config_loader or ConfigLoader()
+        self._project_memory: ProjectMemory | None = None
 
     def run(
         self,
@@ -288,13 +290,18 @@ class PromptAgent(BaseAgent[Storyboard]):
         domain_info: DomainInfo | None = None,
         prompt_context: DomainPromptContext | None = None,
         character_bible: str = "",
+        project_memory: ProjectMemory | None = None,
     ) -> Storyboard:
         """Decide scene content, then compose final image prompts.
 
         Workflow:
-            1. Ask the LLM for subject / environment / action per scene.
+            1. Ask the LLM for subject / environment / action per scene
+               (skipped when ``plan.scene_plans`` is present).
             2. Validate briefs against the director plan.
-            3. :meth:`PromptComposer.compose_from_domain` for each scene.
+            3. :meth:`PromptComposer.compose_from_domain` /
+               :meth:`PromptComposer.compose_from_scene_plan` for each scene,
+               automatically injecting Character/World/Style bibles when
+               ``project_memory`` is provided.
             4. Return a :class:`Storyboard` with composed ``image_prompt`` values.
 
         Args:
@@ -303,6 +310,7 @@ class PromptAgent(BaseAgent[Storyboard]):
             domain_info: Optional domain classification.
             prompt_context: Optional YAML domain prompt defaults.
             character_bible: Optional character-consistency block for the prompt.
+            project_memory: Optional Character/World/Style memory for packs.
 
         Returns:
             The validated storyboard containing composed image prompts only.
@@ -329,16 +337,35 @@ class PromptAgent(BaseAgent[Storyboard]):
             domain_info=domain_info,
             config_loader=self._config_loader,
         )
+        self._project_memory = project_memory
 
         self.logger.info(
             "event=prompt_start agent=PromptAgent topic=%r scenes=%s domain=%s "
-            "style_preset=%r camera_preset=%r",
+            "style_preset=%r camera_preset=%r scene_plans=%s project_memory=%s",
             plan.topic,
             len(plan.scenes),
             resolved_context.domain.value,
             resolved_context.style[:80],
             resolved_context.camera[:80],
+            bool(plan.scene_plans),
+            project_memory.project_id if project_memory else None,
         )
+
+        # Director AI v2: cinematic ScenePlans → PromptComposer (no content LLM).
+        if plan.scene_plans:
+            self._log_progress(
+                f"Composing prompts from {len(plan.scene_plans)} ScenePlans…"
+            )
+            with measure_stage(STAGE_PROMPT_COMPOSER):
+                storyboard = self._compose_from_scene_plans(plan, resolved_context)
+            self.logger.info(
+                "event=prompt_complete agent=PromptAgent topic=%r scenes=%s "
+                "domain=%s source=scene_plans",
+                storyboard.topic,
+                len(storyboard.scenes),
+                resolved_context.domain.value,
+            )
+            return storyboard
 
         self._log_progress(f"Building scene-content instruction for {plan.topic!r}")
         instruction = generate_prompt_agent_prompt(
@@ -398,6 +425,50 @@ class PromptAgent(BaseAgent[Storyboard]):
         )
         return storyboard
 
+    def _compose_from_scene_plans(
+        self,
+        plan: DirectorPlan,
+        prompt_context: DomainPromptContext,
+    ) -> Storyboard:
+        """Compose storyboard image prompts from cinematic ScenePlans."""
+        assert plan.scene_plans is not None
+        scenes: list[Scene] = []
+        for scene_plan in plan.scene_plans:
+            self._log_progress(
+                f"Composing final prompt for scene {scene_plan.id}: "
+                f"{scene_plan.title!r}"
+            )
+            final = self._composer.compose_from_scene_plan(
+                scene_plan,
+                prompt_context,
+                metadata={
+                    "scene_id": scene_plan.id,
+                    "scene_title": scene_plan.title,
+                },
+                project_memory=self._project_memory,
+            )
+            scenes.append(
+                Scene(
+                    id=scene_plan.id,
+                    title=scene_plan.title,
+                    description=scene_plan.description,
+                    image_prompt=final.positive_prompt,
+                    image=None,
+                )
+            )
+            self.logger.info(
+                "event=prompt_composed scene_id=%s domain=%s "
+                "positive_chars=%s negative_chars=%s source=scene_plan "
+                "camera_shot=%r emotion=%r",
+                scene_plan.id,
+                prompt_context.domain.value,
+                len(final.positive_prompt),
+                len(final.negative_prompt),
+                scene_plan.camera_shot,
+                scene_plan.emotion,
+            )
+        return Storyboard(topic=plan.topic, scenes=scenes)
+
     def _compose_storyboard(
         self,
         content: SceneContentPlan,
@@ -419,6 +490,7 @@ class PromptAgent(BaseAgent[Storyboard]):
                     "scene_id": brief.id,
                     "scene_title": brief.title,
                 },
+                project_memory=self._project_memory,
             )
             scenes.append(
                 Scene(

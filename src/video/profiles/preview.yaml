@@ -1,0 +1,8 @@
+# preview — fast, short clips for iteration
+duration: 5
+fps: 16
+width: 720
+height: 1280
+aspect_ratio: "9:16"
+quality: fast
+motion: basic

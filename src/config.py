@@ -69,8 +69,9 @@ class LLMConfig(_SectionSettings):
 
         Precedence (enforced by the factory + router):
         1. Explicit ``LLMClient.model`` / ``generate(..., model=)``
-        2. Non-empty env override for this task (this method)
-        3. ``router.yaml`` task route model
+        2. Admin panel override
+        3. Non-empty env override for this task (this method)
+        4. ``router.yaml`` task route model
         """
         key = task.strip().lower()
         mapping = {
@@ -144,6 +145,7 @@ class ImageConfig(_SectionSettings):
         """Build the RunPod ``input`` object for a FLUX.1-dev job."""
         return {
             "prompt": prompt,
+            "model_id": self.model_id,
             "num_images": num_images,
             "width": self.width,
             "height": self.height,
@@ -212,7 +214,7 @@ class PipelineConfig(_SectionSettings):
         validation_alias="PIPELINE_MAX_COST_USD",
     )
     image_max_workers: int = Field(
-        default=4,
+        default=6,
         ge=1,
         validation_alias=AliasChoices("MAX_PARALLEL_IMAGES", "IMAGE_MAX_WORKERS"),
     )
@@ -243,6 +245,28 @@ class MonitoringConfig(_SectionSettings):
         default=False,
         validation_alias="METRICS_JSON_LOGGING",
     )
+
+
+class SecurityConfig(_SectionSettings):
+    """API authentication and CORS policy."""
+
+    api_key: SecretStr = Field(
+        default=SecretStr(""),
+        validation_alias=AliasChoices("ARAHUS_API_KEY", "API_KEY"),
+    )
+    cors_origins: str = Field(
+        default="http://localhost:3000,http://127.0.0.1:3000",
+        validation_alias="CORS_ORIGINS",
+    )
+    docs_enabled: bool = Field(default=True, validation_alias="API_DOCS_ENABLED")
+
+    def resolved_api_key(self) -> str:
+        return self.api_key.get_secret_value().strip()
+
+    def resolved_cors_origins(self) -> list[str]:
+        from src.security import parse_cors_origins
+
+        return parse_cors_origins(self.cors_origins)
 
 
 class DatabaseConfig(_SectionSettings):
@@ -281,6 +305,7 @@ class AppConfig(BaseSettings):
     pipeline: PipelineConfig = Field(default_factory=PipelineConfig)
     monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
+    security: SecurityConfig = Field(default_factory=SecurityConfig)
 
 
 @lru_cache(maxsize=1)
@@ -297,6 +322,7 @@ def get_settings() -> AppConfig:
         pipeline=PipelineConfig(),
         monitoring=MonitoringConfig(),
         database=DatabaseConfig(),
+        security=SecurityConfig(),
     )
 
 

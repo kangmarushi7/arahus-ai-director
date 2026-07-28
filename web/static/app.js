@@ -125,6 +125,11 @@ function renderResult(result) {
   overview.innerHTML = `
     <div class="grid-2">
       <div class="card"><h4>Topic</h4><p>${escapeHtml(result.topic)}</p></div>
+      <div class="card"><h4>Request id</h4><p>${
+        result.run_id
+          ? `<a class="run-id-link" href="/admin#${escapeHtml(result.run_id)}">${escapeHtml(result.run_id)}</a>`
+          : "—"
+      }</p></div>
       <div class="card"><h4>Domain</h4><p>${domain}</p></div>
       <div class="card"><h4>Review</h4><p>${result.review.approved ? "Approved" : "Rejected"} · score ${Math.round(result.review.overall_score)}</p></div>
       <div class="card"><h4>Images</h4><p>${result.images.filter((i) => i.url).length}/${result.images.length} with URLs${result.using_stub_services ? " · stubs used" : ""}</p></div>
@@ -259,7 +264,10 @@ els.form.addEventListener("submit", async (event) => {
     }
 
     await readSse(res, (payload) => {
-      if (payload.type === "progress") {
+      if (payload.type === "run_id" && payload.run_id) {
+        appendLog(`Request id: ${payload.run_id}`);
+        els.footHint.innerHTML = `Request <a class="run-id-link" href="/admin#${payload.run_id}">${payload.run_id}</a>`;
+      } else if (payload.type === "progress") {
         const pct = Math.round((payload.fraction || 0) * 100);
         els.progressFill.style.width = `${pct}%`;
         els.liveMeta.textContent = `${pct}%`;
@@ -267,7 +275,13 @@ els.form.addEventListener("submit", async (event) => {
         if (payload.message) appendLog(payload.message);
       } else if (payload.type === "result") {
         renderResult(payload.result);
-        showBanner("Pipeline finished.", "ok");
+        const runId = payload.run_id || payload.result?.run_id;
+        showBanner(
+          runId
+            ? `Pipeline finished. Open admin logs for request ${runId}.`
+            : "Pipeline finished.",
+          "ok"
+        );
         els.footHint.textContent = "Run complete";
       } else if (payload.type === "error") {
         const message = payload.error?.message || "Pipeline failed";

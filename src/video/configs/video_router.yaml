@@ -1,0 +1,43 @@
+# Video router YAML — production Wan 2.1 I2V / T2V via RunPod.
+# Set RUNPOD_VIDEO_ENDPOINT_ID (+ RUNPOD_API_KEY) to enable live generation.
+# providers.runpod.enabled gates the provider; empty endpoint still refuses.
+
+default_provider: runpod
+default_quality: production
+default_profile: production
+
+providers:
+  runpod:
+    type: runpod
+    api_key_env: RUNPOD_API_KEY
+    endpoint_id_env: RUNPOD_VIDEO_ENDPOINT_ID
+    base_url: https://api.runpod.ai/v2
+    timeout_seconds: 300
+    enabled: true
+
+models:
+  wan21:
+    provider: runpod
+    model_id: wan-2.1
+    description: Wan 2.1 text/image-to-video (RunPod serverless)
+    quality_modes: [preview, production, experimental]
+    duration: 5
+    fps: 24
+    width: 720
+    height: 1280
+    aspect_ratio: "9:16"
+    cost_per_second: 0.05
+    motion: natural
+
+profiles: {}
+
+quality_modes:
+  preview:
+    model: wan21
+    profile: preview
+  production:
+    model: wan21
+    profile: production
+  experimental:
+    model: wan21
+    profile: cinematic

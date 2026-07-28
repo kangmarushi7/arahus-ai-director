@@ -1,0 +1,54 @@
+# Image router YAML — FLUX.1 Dev production registry.
+# Preview profile uses fewer steps for cheaper FLUX previews (not SDXL Turbo).
+
+default_provider: runpod
+default_quality: production
+default_profile: production
+
+providers:
+  runpod:
+    type: runpod
+    api_key_env: RUNPOD_API_KEY
+    endpoint_id_env: RUNPOD_ENDPOINT_ID
+    base_url: https://api.runpod.ai/v2
+    timeout_seconds: 120
+
+models:
+  flux1-dev:
+    provider: runpod
+    model_id: black-forest-labs/FLUX.1-dev
+    description: FLUX.1 Dev via RunPod serverless worker
+    quality_modes: [preview, production, experimental]
+    width: 1024
+    height: 1024
+    steps: 28
+    guidance_scale: 3.5
+    cost_per_image: 0.02
+
+profiles:
+  preview:
+    width: 768
+    height: 768
+    steps: 8
+    guidance_scale: 2.0
+  production:
+    width: 1024
+    height: 1024
+    steps: 28
+    guidance_scale: 3.5
+  cinematic:
+    width: 1280
+    height: 720
+    steps: 30
+    guidance_scale: 4.0
+
+quality_modes:
+  preview:
+    model: flux1-dev
+    profile: preview
+  production:
+    model: flux1-dev
+    profile: production
+  experimental:
+    model: flux1-dev
+    profile: cinematic
